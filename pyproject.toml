@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=77"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "can-xcp-uds-framework"
+version = "0.1.0"
+description = "ECU-independent CAN and CAN-FD communication for bench development"
+readme = "README.md"
+requires-python = ">=3.13"
+dependencies = ["python-can>=4.6.1,<5"]
+
+[project.optional-dependencies]
+dev = ["pytest>=8,<10"]
+
+[project.scripts]
+ecu-can = "ecu_comm.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
