@@ -19,6 +19,9 @@ Command-line options override profile values. Example:
     [security]
     algorithm = "aes128-ecb"
     key_file = "C:/keys/my_ecu.key"   # keep secrets outside the repository
+
+    [dbc]
+    files = ["my_ecu.dbc", "C:/networks/body.dbc"]   # relative to this profile's folder
 """
 
 import tomllib
@@ -35,6 +38,7 @@ SECTIONS = {
     },
     "uds": {"timeout": (int, float), "keep_alive": (int, float)},
     "security": {"algorithm": str, "key_file": str},
+    "dbc": {"files": list},
 }
 
 
@@ -43,9 +47,9 @@ def empty_profile() -> dict[str, dict]:
 
 
 def load_profile(path: str | Path) -> dict[str, dict]:
-    """Return one dict per section (bus, isotp, uds, security) with checked key names and types.
+    """Return one dict per section (bus, isotp, uds, security, dbc) with checked key names and types.
 
-    A relative ``security.key_file`` is resolved against the profile's folder.
+    A relative ``security.key_file`` or ``dbc.files`` entry is resolved against the profile's folder.
     """
     with open(path, "rb") as file:
         try:
@@ -70,6 +74,8 @@ def load_profile(path: str | Path) -> dict[str, dict]:
             bool_allowed = expected is bool or (isinstance(expected, tuple) and bool in expected)
             if not isinstance(value, expected) or (isinstance(value, bool) and not bool_allowed):
                 raise ValueError(f"{path}: {section}.{key} has the wrong type")
+        if section == "dbc" and not all(isinstance(item, str) for item in values.get("files", [])):
+            raise ValueError(f"{path}: dbc.files must be a list of file names")
         if section == "isotp" and values.get("padding") is True:
             raise ValueError(f"{path}: isotp.padding must be a byte value or false")
         profile[section] = dict(values)
@@ -77,4 +83,6 @@ def load_profile(path: str | Path) -> dict[str, dict]:
         profile["isotp"]["padding"] = None
     if "key_file" in profile["security"]:
         profile["security"]["key_file"] = str(Path(path).parent / profile["security"]["key_file"])
+    if "files" in profile["dbc"]:
+        profile["dbc"]["files"] = [str(Path(path).parent / name) for name in profile["dbc"]["files"]]
     return profile

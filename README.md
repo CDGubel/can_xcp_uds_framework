@@ -12,6 +12,9 @@ in-process virtual CAN and PEAK PCAN-Basic.
   algorithms, RoutineControl, WriteDataByIdentifier, a `uds shell` that runs
   scripts over one connection with TesterPresent in the background, and a
   simulated "test_board" with checks that can also run against the real board.
+- **DBC:** decoding with `cantools` (`listen --dbc`, `decode` for recorded
+  logs with CSV export), `dbc show`, and frames built from signal values
+  (`dbc encode`, `dbc send`); `listen --log` records traffic.
 
 For a step-by-step guide with real commands and output, see the
 [user's manual](docs/USER_MANUAL.md).
@@ -210,6 +213,32 @@ itself. `--functional-id` makes it answer functional requests too, and
 `--board test_board` selects the test_board behaviour. On the virtual backend it only reaches testers in the same process, as
 the tests and `uds demo` do.
 
+## DBC files
+
+`ecu-can` decodes frames into named signals with one or more DBC files, given
+with `--dbc FILE` or listed in a profile's `[dbc]` section. Try it with the
+invented network `profiles/test_board.dbc` and its recorded traffic
+`examples/test_board_sample.asc`:
+
+```powershell
+.\.venv\Scripts\ecu-can.exe dbc show --dbc profiles\test_board.dbc
+.\.venv\Scripts\ecu-can.exe decode --dbc profiles\test_board.dbc examples\test_board_sample.asc
+.\.venv\Scripts\ecu-can.exe decode --dbc profiles\test_board.dbc --message PhaseCurrents --csv currents.csv examples\test_board_sample.asc
+.\.venv\Scripts\ecu-can.exe dbc encode --dbc profiles\test_board.dbc BoardStatus State=Running SupplyVoltage=24.12
+.\.venv\Scripts\ecu-can.exe listen --interface pcan --dbc C:\networks\board.dbc --duration 60 --log C:\logs\run1.blf
+```
+
+- `listen` and `decode` print each frame with its decoded signals; `--message`
+  and `--signal` filter the output. `decode` reads `.asc`, `.blf`, `.csv`,
+  `.log`, `.trc` and `.db` logs, and `--csv` writes one row per signal value.
+- `dbc encode` builds a frame from values (numbers or value names) and `dbc send`
+  transmits it, optionally every `--period` seconds. Values a signal cannot carry
+  exactly, values out of range and signals of another multiplexer page are refused.
+- Two DBC files defining the same ID are an error. Keep company DBC files outside
+  the repository.
+
+See section 10 of the [user's manual](docs/USER_MANUAL.md) for examples with output.
+
 ## Project layout and next milestones
 
 - `src/ecu_comm/transport.py` opens backends, configures bit timing, and
@@ -221,16 +250,17 @@ the tests and `uds demo` do.
 - `src/ecu_comm/security.py` holds the key algorithms and loads secrets.
 - `src/ecu_comm/sim_ecu.py` is the simulated UDS server, and
   `sim_test_board.py` the simulated test_board.
+- `src/ecu_comm/dbc.py` loads DBC files and decodes and encodes frames.
 - `src/ecu_comm/ecu_profile.py` loads and checks TOML profiles.
 - `src/ecu_comm/cli.py` and `uds_cli.py` provide the `ecu-can` commands.
+- `scripts/make_test_board_log.py` regenerates `examples/test_board_sample.asc`.
 - `tests/` covers raw frames, ISO-TP (single and multi-frame, padding, FD,
-  29-bit), UDS against the simulated ECUs, security keys, the CLI, the shell
-  and the profiles.
+  29-bit), UDS against the simulated ECUs, security keys, the CLI, the shell,
+  the profiles, and DBC decoding, encoding and log files.
 
 From Python, `open_uds_client` returns a standard `udsoncan` client, so all
 its services are available, including DIDs with your own codecs
 (`data_identifiers=`).
 
-The remaining planned integrations are DBC decoding with `cantools` and XCP
-with `pyXCP`. A2L and DBC files will belong in external configuration alongside
-the ECU profiles.
+The remaining planned integration is XCP with `pyXCP`. A2L files, like DBC
+files, will belong in external configuration alongside the ECU profiles.
