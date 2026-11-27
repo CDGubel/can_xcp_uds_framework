@@ -13,6 +13,9 @@ in-process virtual CAN and PEAK PCAN-Basic.
   scripts over one connection with TesterPresent in the background, and a
   simulated "test_board" with checks that can also run against the real board.
 
+For a step-by-step guide with real commands and output, see the
+[user's manual](docs/USER_MANUAL.md).
+
 ## Set up on Windows 11
 
 From PowerShell, in the project folder (for example a clone of this repository):
