@@ -955,7 +955,7 @@ ecu-can: profiles\test_board.dbc: 0x100 (BoardStatus) is already defined as Boar
 |---|---|---|
 | `no response from the ECU before the timeout` | nothing answered on the response ID | Check 24 V, the cable on PT-CAN, the channel name, the bitrate and the IDs. |
 | `The driver is not loaded` | Windows sees no PEAK adapter on that channel | Check the USB cable and that the adapter shows under "CAN-Hardware" in Device Manager; install PEAK's device driver if it never appears. |
-| `uptime library not available, timestamps are relative to boot time ...` | a python-can notice, printed once | Harmless; ignore it. |
+| `uptime library not available, timestamps are relative to boot time ...` | the venv was installed before the framework required `uptime` | Harmless (frame times count from Windows start-up instead of the date and time). Reinstall to remove it: `.\.venv\Scripts\python.exe -m pip install -e ".[dev]"`. |
 | `UDS needs --tx-id and --rx-id, or an --ecu profile that sets them` | no addressing given | Add `--ecu` or the two IDs. |
 | `negative response 0x7F (ServiceNotSupportedInActiveSession)` | wrong session | Use the shell with `session extended` first. |
 | `negative response 0x33 (SecurityAccessDenied)` | level is locked | `unlock 1` first, in the same shell. |
