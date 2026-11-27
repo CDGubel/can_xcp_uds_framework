@@ -10,9 +10,15 @@ Command-line options override profile values. Example:
     tx_id = 0x7E0
     rx_id = 0x7E8
     padding = 0xCC   # false disables padding
+    functional_id = 0x7DF
 
     [uds]
     timeout = 2.0
+    keep_alive = 2.0   # TesterPresent period in the shell, 0 disables it
+
+    [security]
+    algorithm = "aes128-ecb"
+    key_file = "C:/keys/my_ecu.key"   # keep secrets outside the repository
 """
 
 import tomllib
@@ -25,14 +31,22 @@ SECTIONS = {
     },
     "isotp": {
         "tx_id": int, "rx_id": int, "extended": bool, "fd": bool, "brs": bool,
-        "padding": (int, bool), "stmin": int, "blocksize": int,
+        "padding": (int, bool), "stmin": int, "blocksize": int, "functional_id": int,
     },
-    "uds": {"timeout": (int, float)},
+    "uds": {"timeout": (int, float), "keep_alive": (int, float)},
+    "security": {"algorithm": str, "key_file": str},
 }
 
 
+def empty_profile() -> dict[str, dict]:
+    return {section: {} for section in SECTIONS}
+
+
 def load_profile(path: str | Path) -> dict[str, dict]:
-    """Return ``{"bus": {...}, "isotp": {...}, "uds": {...}}`` with checked key names and types."""
+    """Return one dict per section (bus, isotp, uds, security) with checked key names and types.
+
+    A relative ``security.key_file`` is resolved against the profile's folder.
+    """
     with open(path, "rb") as file:
         try:
             data = tomllib.load(file)
@@ -61,4 +75,6 @@ def load_profile(path: str | Path) -> dict[str, dict]:
         profile[section] = dict(values)
     if profile["isotp"].get("padding") is False:
         profile["isotp"]["padding"] = None
+    if "key_file" in profile["security"]:
+        profile["security"]["key_file"] = str(Path(path).parent / profile["security"]["key_file"])
     return profile

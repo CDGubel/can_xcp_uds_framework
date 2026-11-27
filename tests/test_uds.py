@@ -73,8 +73,8 @@ def test_send_raw_suppressed_response_times_out():
 class PendingEcu(SimulatedEcu):
     """Answers every request with NRC 0x78 (responsePending) before the real response."""
 
-    def responses(self, request):
-        return [bytes((0x7F, request[0], 0x78)), *super().responses(request)]
+    def responses(self, request, functional=False):
+        return [bytes((0x7F, request[0], 0x78)), *super().responses(request, functional)]
 
 
 def test_send_raw_waits_through_response_pending():

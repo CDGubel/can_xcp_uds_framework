@@ -8,6 +8,13 @@ in-process virtual CAN and PEAK PCAN-Basic.
 - **Milestone 2:** ISO-TP (ISO 15765-2) with `can-isotp` and UDS (ISO 14229)
   with `udsoncan` (`ecu-can uds ...`), ECU profiles in TOML, and a simulated
   ECU for development without hardware.
+- **Bench UDS:** functional addressing, SecurityAccess with pluggable key
+  algorithms, RoutineControl, WriteDataByIdentifier, a `uds shell` that runs
+  scripts over one connection with TesterPresent in the background, and a
+  simulated "test_board" with checks that can also run against the real board.
+
+For a step-by-step guide with real commands and output, see the
+[user's manual](docs/USER_MANUAL.md).
 
 ## Set up on Windows 11
 
@@ -87,6 +94,10 @@ $ecu = "--interface", "pcan", "--tx-id", "0x7E0", "--rx-id", "0x7E8"
 .\.venv\Scripts\ecu-can.exe uds read-did 0xF190 0xF187 @ecu
 .\.venv\Scripts\ecu-can.exe uds reset hard @ecu
 .\.venv\Scripts\ecu-can.exe uds raw "22 F1 90" @ecu
+.\.venv\Scripts\ecu-can.exe uds write-did 0xF184 "41 42 43" @ecu
+.\.venv\Scripts\ecu-can.exe uds routine start 0xFF00 "01 02" @ecu
+.\.venv\Scripts\ecu-can.exe uds functional "3E 80" --functional-id 0x7DF @ecu
+.\.venv\Scripts\ecu-can.exe uds unlock 1 --key-file C:\keys\my_ecu.key @ecu
 ```
 
 - `session` accepts `default`, `programming`, `extended` or a number, and
@@ -94,7 +105,17 @@ $ecu = "--interface", "pcan", "--tx-id", "0x7E0", "--rx-id", "0x7E8"
 - `read-did` sends one request per DID and prints each value as hex, plus
   ASCII text when every byte is printable.
 - `raw` sends the bytes exactly as given and prints the response, including
-  negative responses. It waits through NRC 0x78 (response pending).
+  negative responses. It waits through NRC 0x78 (response pending). With
+  `--expect HEX` it succeeds only when the response starts with those bytes
+  (a negative response can be the expected one); `--expect none` expects no
+  response.
+- `routine` takes `start`, `stop`, `result` or a number, the RID and an
+  optional option record, and prints the routine status record.
+- `functional` sends one single frame to `--functional-id` (7 bytes on
+  classic CAN) and lists every response on `--rx-id` within `--listen` seconds
+  (default 0.5). `--expect` works as for `raw`.
+- `unlock LEVEL` requests a seed, computes the key and sends it. An all-zero
+  seed means the level is already unlocked. See *SecurityAccess keys* below.
 - Commands exit with status 1 on a negative response, a timeout or an error,
   and the message names the negative response code.
 - ISO-TP options: `--extended` for 29-bit IDs, `--frame-fd` (with `--fd`) for
@@ -115,6 +136,64 @@ command (`send`, `listen` and `uds`) accepts `--ecu`:
 .\.venv\Scripts\ecu-can.exe uds read-did 0xF190 --ecu profiles\my_ecu.toml
 ```
 
+### SecurityAccess keys
+
+Key algorithms are pluggable: `--key-algorithm aes128-ecb` (the default:
+key = AES-128-ECB(secret, seed)) or `package.module:function` for your own
+`function(seed, level, secret) -> key`. The secret is read at run time from
+`--key-file` (hex text), `security.key_file` in the profile, or the
+`ECU_COMM_SECURITY_KEY` environment variable. **Never commit secrets:**
+`*.key` files and `keys/` are ignored by git; keep them outside the repository.
+AES needs the `cryptography` package (`pip install -e ".[security]"`, included
+in `[dev]`).
+
+```powershell
+$env:ECU_COMM_SECURITY_KEY = Get-Content C:\keys\my_ecu.key
+```
+
+### Scripts and the UDS shell
+
+Each command above opens and closes its own connection, so an ECU can fall
+back to the default session between them. `uds shell` keeps one connection
+open and sends TesterPresent (`3E 80`, response suppressed) every
+`--keep-alive` seconds (default 2, `uds.keep_alive` in a profile, 0 disables
+it). It reads one command per line, the same commands as above without the bus
+options, plus `sleep SECONDS`, `help` and `quit`; `#` starts a comment.
+
+```powershell
+.\.venv\Scripts\ecu-can.exe uds shell --ecu profiles\test_board.toml                 # type commands
+.\.venv\Scripts\ecu-can.exe uds shell --ecu profiles\test_board.toml my_steps.uds    # run a script
+```
+
+A script (or piped input) echoes each line and stops at the first failure with
+exit status 1; typed commands keep going after an error.
+
+### The test_board
+
+[profiles/test_board.toml](profiles/test_board.toml) describes a bench board:
+PT-CAN on `PCAN_USBBUS2`, classic CAN at 500 kbit/s, requests on 0x60A,
+responses on 0x68A, functional requests on 0x601, padding 0xAA.
+[scripts/test_board_readonly.uds](scripts/test_board_readonly.uds) checks it
+without writing, unlocking or running routines:
+
+```powershell
+.\.venv\Scripts\ecu-can.exe uds shell --ecu profiles\test_board.toml scripts\test_board_readonly.uds
+```
+
+`uds simulate --board test_board` imitates the board (sessions and timing, S3,
+DIDs, SecurityAccess with attempt limit and delay, the sensor-transaction
+routine 0xFD00 and its preconditions, functional addressing). It uses a public
+throw-away secret unless a key file or `ECU_COMM_SECURITY_KEY` is given.
+
+`tests/test_board_checks.py` runs against that simulator by default. With
+`--board-profile` it runs the hardware-safe checks against the real board;
+checks marked `sim_only` (writes, programming session, communication control)
+are skipped there:
+
+```powershell
+.\.venv\Scripts\python.exe -m pytest tests\test_board_checks.py --board-profile profiles\test_board.toml
+```
+
 ### Simulated ECU
 
 `ecu-can uds simulate` answers DiagnosticSessionControl (0x10), ECUReset
@@ -127,7 +206,8 @@ on a second adapter or channel of the same bus and point the tester at it:
 ```
 
 Use the same `--tx-id` and `--rx-id` as the tester. The simulator swaps them
-itself. On the virtual backend it only reaches testers in the same process, as
+itself. `--functional-id` makes it answer functional requests too, and
+`--board test_board` selects the test_board behaviour. On the virtual backend it only reaches testers in the same process, as
 the tests and `uds demo` do.
 
 ## Project layout and next milestones
@@ -137,16 +217,19 @@ the tests and `uds demo` do.
 - `src/ecu_comm/isotp_link.py` runs an ISO-TP stack on a bus (`IsoTpConfig`,
   `open_isotp`).
 - `src/ecu_comm/uds.py` opens a `udsoncan` client (`open_uds_client`) and adds
-  raw requests and raw DID reads.
-- `src/ecu_comm/sim_ecu.py` is the simulated UDS server.
+  raw requests, raw DID reads, functional requests and `unlock`.
+- `src/ecu_comm/security.py` holds the key algorithms and loads secrets.
+- `src/ecu_comm/sim_ecu.py` is the simulated UDS server, and
+  `sim_test_board.py` the simulated test_board.
 - `src/ecu_comm/ecu_profile.py` loads and checks TOML profiles.
 - `src/ecu_comm/cli.py` and `uds_cli.py` provide the `ecu-can` commands.
 - `tests/` covers raw frames, ISO-TP (single and multi-frame, padding, FD,
-  29-bit), UDS against the simulated ECU, the CLI and the profiles.
+  29-bit), UDS against the simulated ECUs, security keys, the CLI, the shell
+  and the profiles.
 
 From Python, `open_uds_client` returns a standard `udsoncan` client, so all
-its services are available, including security access and DIDs with your own
-codecs (`data_identifiers=`).
+its services are available, including DIDs with your own codecs
+(`data_identifiers=`).
 
 The remaining planned integrations are DBC decoding with `cantools` and XCP
 with `pyXCP`. A2L and DBC files will belong in external configuration alongside

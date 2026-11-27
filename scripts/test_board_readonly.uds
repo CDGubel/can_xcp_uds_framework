@@ -1,0 +1,26 @@
+# Read-only checks of the test_board (no writes, no unlock, no routines).
+#   ecu-can uds shell --ecu profiles/test_board.toml scripts/test_board_readonly.uds
+# Stops at the first failed line. Every request is answered with a physical
+# response on 0x68A unless the positive response is suppressed.
+
+tester-present
+raw "22 F1 A0" --expect "62 F1 A0 02"          # the application image is running
+raw "22 F1 86" --expect "62 F1 86 01"          # default session after power-up
+read-did 0xF110 0xF111 0xF112 0xF189 0xF195    # version DIDs (3 bytes each)
+read-did 0xF183 0xF184 0xF18C 0xF190           # fingerprints, serial, VIN
+read-did 0xFD10 0xFD11                         # phase currents, sensor addresses
+raw "22 FE ED" --expect "7F 22 31"             # unknown DID
+raw "22 F1" --expect "7F 22 13"                # bad length
+raw "10 05" --expect "7F 10 12"                # unknown session
+
+session extended
+raw "22 F1 86" --expect "62 F1 86 03"
+functional "3E 80" --expect none              # suppressed TesterPresent
+sleep 6                                        # longer than S3: the keep-alive holds the session
+raw "22 F1 86" --expect "62 F1 86 03"
+session default
+
+functional "10 83" --expect none              # extended session, response suppressed
+raw "22 F1 86" --expect "62 F1 86 03"
+functional "10 01" --expect "50 01 00 64 00 C8"
+raw "22 F1 86" --expect "62 F1 86 01"
