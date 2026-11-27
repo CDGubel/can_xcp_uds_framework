@@ -74,6 +74,25 @@ fields = [{ name = "Major", type = "uint8" }, { name = "Minor", type = "uint8" }
 name = "ActiveImage"
 fields = [{ name = "Image", type = "uint8", choices = { 2 = "application" } }]
 
+[dids.0xF1A1]
+# What the bootloader saw and decided at its last boot, left in RAM that survives a reset.
+# Valid only when Magic holds the bootloader's marker; all zeros: no record.
+name = "BootInfo"
+fields = [
+    { name = "Magic", type = "uint32", display = "hex" },
+    { name = "RequestMagic", type = "uint32", display = "hex" },
+    { name = "RequestValue", type = "uint32", display = "hex" },
+    { name = "RequestCheck", type = "uint32", display = "hex" },
+    { name = "ResetCauseDes", type = "uint32", display = "hex" },
+    { name = "ResetCauseFes", type = "uint32", display = "hex" },
+    { name = "ImageMarker", type = "uint32", display = "hex" },
+    { name = "ImageSp", type = "uint32", display = "hex" },
+    { name = "ImageResetVector", type = "uint32", display = "hex" },
+    { name = "RequestValid", type = "uint32", choices = { 0 = "no", 1 = "yes" } },
+    { name = "ImageValid", type = "uint32", choices = { 0 = "no", 1 = "yes" } },
+    { name = "Decision", type = "uint32", choices = { 0 = "none", 1 = "jumped-to-app", 2 = "stayed-in-bootloader" } },
+]
+
 [dids.0xFD10]
 name = "PhaseCurrents"
 fields = [

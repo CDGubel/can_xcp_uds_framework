@@ -180,3 +180,24 @@ def test_bad_arguments(args, message, capsys):
     with pytest.raises(SystemExit):
         main(["uds", "dtc", *args, "--channel", "x", "--tx-id", "1", "--rx-id", "2"])
     assert message in capsys.readouterr().err
+
+
+def test_test_board_resets_like_the_board():
+    """Only hardReset; from the programming session it needs level 3 (the hand-off to the bootloader)."""
+    from ecu_comm.sim_test_board import SIM_SECRET
+    from ecu_comm.security import aes128_ecb
+
+    board = SimulatedTestBoard()
+    assert board.handle(bytes.fromhex("11 03")) == bytes.fromhex("7F 11 12")
+    assert board.handle(bytes.fromhex("11 02")) == bytes.fromhex("7F 11 12")
+    assert board.handle(bytes.fromhex("11 01 00")) == bytes.fromhex("7F 11 13")
+    assert board.handle(bytes.fromhex("10 03"))[:2] == bytes.fromhex("50 03")
+    assert board.handle(bytes.fromhex("11 01")) == bytes.fromhex("51 01")
+    assert board.session == 0x01
+    assert board.handle(bytes.fromhex("10 02"))[:2] == bytes.fromhex("50 02")
+    assert board.handle(bytes.fromhex("11 01")) == bytes.fromhex("7F 11 33")
+    seed = board.handle(bytes.fromhex("27 03"))[2:]
+    assert board.handle(bytes.fromhex("27 04") + aes128_ecb(seed, 0x03, SIM_SECRET))[:2] == bytes.fromhex("67 04")
+    assert board.handle(bytes.fromhex("11 01")) == bytes.fromhex("51 01")
+    assert board.session == 0x01 and board.unlocked is None
+    assert board.handle(bytes.fromhex("11 81")) is None   # suppressed positive response

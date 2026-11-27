@@ -9,7 +9,11 @@ Behaviour copied from the board:
 * sessions 0x01/0x02/0x03 with P2 100 ms and P2* 2000 ms; a session change or
   reset relocks SecurityAccess; S3 (``s3`` seconds without a request) falls back
   to the default session;
-* DID 0xF186 reports the active session, 0xF1A0 the active image (0x02 = app);
+* DID 0xF186 reports the active session, 0xF1A0 the active image (0x02 = app),
+  0xF1A1 a 48-byte boot record (all zeros here: no record);
+* ECUReset accepts only hardReset (0x01); other types get 0x12. From the
+  programming session it is the hand-off to the bootloader and needs level 0x03
+  unlocked (else 0x33); the simulator then simply restarts in the default session;
 * SecurityAccess with a 16-byte seed and key = AES-128-ECB(secret, seed); an
   all-zero seed means already unlocked; wrong keys give 0x35, the last allowed
   attempt 0x36, then seed requests give 0x37 until ``lockout`` seconds pass;
@@ -80,6 +84,7 @@ TEST_BOARD_DIDS = {
     0xF190: b"TESTBOARD00000001",         # VIN, 17 bytes
     0xF195: bytes((0, 3, 1)),             # supplier software version
     0xF1A0: bytes((0x02,)),               # active image: application
+    0xF1A1: bytes(48),                    # boot record from the bootloader: none
     0xFD10: bytes(6),                     # phase currents U, V, W: int16 BE, 0.1 A
     0xFD11: bytes(4),                     # sensor addresses U, V, W, found flag
     0xFF00: bytes((0x02, 0x00, 0x00, 0x00)),  # UDS version
@@ -167,10 +172,14 @@ class SimulatedTestBoard(SimulatedEcu):
         return _positive(request, bytes((0x50, session)) + TEST_BOARD_SESSION_TIMING)
 
     def _reset(self, request: bytes) -> bytes | None:
-        response = super()._reset(request)
-        if response is None or response[0] == 0x51:
-            self._enter_session(SESSION_DEFAULT)
-        return response
+        if len(request) != 2:
+            return _negative(0x11, INCORRECT_LENGTH)
+        if request[1] & 0x7F != 0x01:
+            return _negative(0x11, SUBFUNCTION_NOT_SUPPORTED)  # the board only does hardReset
+        if self.session == SESSION_PROGRAMMING and self.unlocked != LEVEL_PROGRAMMING:
+            return _negative(0x11, SECURITY_ACCESS_DENIED)     # the hand-off to the bootloader needs level 3
+        self._enter_session(SESSION_DEFAULT)
+        return _positive(request, b"\x51\x01")
 
     # -- data identifiers -------------------------------------------------------
 

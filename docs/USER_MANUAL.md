@@ -14,6 +14,8 @@ stream. Each example is labelled with where its output came from:
 - **Output (simulator, B19 pending)**: produced by the simulated test_board,
   which imitates B19. It is replaced with B19 output after the bench run. Values
   such as serial numbers and versions differ on a real board; the format does not.
+  No example carries this label at present: every hardware example has been run
+  on B19.
 
 Some B19 output was captured by the shell (section 6), which prints a response in
 exactly the same form as the single command.
@@ -197,6 +199,7 @@ fields = [{ name = "Session", type = "uint8", choices = { 1 = "default", 2 = "pr
 | `scale`, `offset` | physical value = raw x scale + offset (numbers only) |
 | `unit` | printed after the value |
 | `choices` | names for raw values, e.g. `{ 0 = "no", 1 = "yes" }` |
+| `display` | `"hex"` prints an unscaled integer as `0x...` at its full width (default `"decimal"`) |
 
 The fields are read in order, from the first byte. A DID with only a `name` is
 still printed as bytes, under its name. Names are matched without regard to
@@ -462,17 +465,29 @@ practice you run them from the shell (see the example in section 6).
 ### reset: ECUReset (0x11)
 
 ```powershell
+ecu-can uds reset hard @tb
+```
+
+Accepts `hard`, `key-off-on`, `soft` or a number, and prints
+`ECU reset 0x01 accepted` when the ECU agrees. The board then restarts in the
+default session and locked.
+
+**B19 accepts only `hard`.** Other types are refused before anything happens:
+
+```powershell
 ecu-can uds reset soft @tb
 ```
 
-**Output (simulator, B19 pending)**
+**Output (B19)**
 
 ```text
-ECU reset 0x03 accepted
+ecu-can: negative response 0x12 (SubFunctionNotSupported)
 ```
 
-Accepts `hard`, `key-off-on`, `soft` or a number. The board restarts in the
-default session and locked.
+> **B19:** a hard reset from the **programming** session is not a restart: it
+> is the hand-off to the bootloader, which then stays resident for flashing.
+> It needs security level 3 unlocked (else NRC 0x33). From the default or
+> extended session `reset hard` is a plain restart.
 
 ### routine: RoutineControl (0x31)
 
@@ -1224,6 +1239,7 @@ For functional requests the board stays silent instead of sending 0x11, 0x12,
 | 0xF110, 0xF111, 0xF112, 0xF189, 0xF195 | CalibrationVersion, BootloaderVersion, HardwareVersion, SoftwareVersion, SupplierSoftwareVersion: 3 bytes each |
 | 0xF183, 0xF184 | BootFingerprint, AppFingerprint |
 | 0xF18C, 0xF190 | SerialNumber, VIN |
+| 0xF1A1 | BootInfo: the record the bootloader leaves at each boot (48 bytes) |
 | 0xFD10, 0xFD11 | PhaseCurrents (0.1 A), SensorAddresses |
 
 The names are the ones in `profiles\test_board.toml`.

@@ -278,3 +278,34 @@ def test_logged_bus_with_echoes_records_each_sent_frame_once_and_hides_the_echo(
             assert logged.recv(0.1) is None
     assert [(m.arbitration_id, m.is_rx) for m in received] == [(0x123, False), (0x456, True)]
     assert received[0].timestamp <= received[1].timestamp
+
+
+def test_hex_display():
+    defs = table("""
+[dids.0xF1A1]
+name = "Boot"
+fields = [
+    { name = "Magic", type = "uint32", display = "hex" },
+    { name = "Decision", type = "uint32", display = "hex", choices = { 1 = "jumped" } },
+]
+""")
+    assert dids.format_fields(defs[0xF1A1], bytes.fromhex("00ABCDEF 00000001")) == "Magic=0x00ABCDEF, Decision=jumped"
+    assert dids.format_fields(defs[0xF1A1], bytes.fromhex("FFFFFFFF 00000007")) == "Magic=0xFFFFFFFF, Decision=0x00000007"
+    assert dids.describe(defs[0xF1A1])[1] == "  Magic: uint32, hex"
+
+
+@pytest.mark.parametrize("field, message", [
+    ('{ name = "X", type = "uint8", display = "octal" }', 'display must be "decimal" or "hex"'),
+    ('{ name = "X", type = "uint8", display = "hex", scale = 0.5 }', "for unscaled integer fields"),
+    ('{ name = "X", type = "bytes", display = "hex" }', "for unscaled integer fields"),
+])
+def test_hex_display_errors(field, message):
+    with pytest.raises(ValueError, match=message):
+        table(f'[dids.0x0100]\nname = "A"\nfields = [{field}]')
+
+
+def test_test_board_boot_info(board_channel, capsys):
+    assert run_board(board_channel, "read-did", "BootInfo") == 0
+    out = capsys.readouterr().out
+    assert out.startswith("0xF1A1 BootInfo [48] 00 00")
+    assert out.rstrip().endswith("RequestValid=no, ImageValid=no, Decision=none")
