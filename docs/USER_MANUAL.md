@@ -318,6 +318,10 @@ Response [3] 7F 22 31 (negative response 0x31 (RequestOutOfRange))
 Response [3] 7F 22 13 (negative response 0x13 (IncorrectMessageLengthOrInvalidFormat))
 > raw '10 05' --expect '7F 10 12'
 Response [3] 7F 10 12 (negative response 0x12 (SubFunctionNotSupported))
+> raw '19 02 FF' --expect '59 02'
+Response [2] 59 02 (positive response)
+> raw '19 02' --expect '7F 19 13'
+Response [3] 7F 19 13 (negative response 0x13 (IncorrectMessageLengthOrInvalidFormat))
 > session extended
 Session 0x03 (extended) active. P2 = 100 ms, P2* = 2000 ms.
 > raw '22 F1 86' --expect '62 F1 86 03'
@@ -621,6 +625,96 @@ ecu-can uds functional "3E 00" @tb
 Response [2] 7E 00 (positive response)
 ```
 
+### dtc: diagnostic trouble codes (0x19, 0x14)
+
+Four sub-commands:
+
+| Command | Request | Shows |
+|---|---|---|
+| `dtc count [--mask M]` | `19 01 M` | how many DTCs have a status bit in `M` |
+| `dtc read [--mask M]` | `19 02 M` | those DTCs, with their status |
+| `dtc supported` | `19 0A` | every DTC the ECU knows, with its status |
+| `dtc clear [GROUP]` | `14 GG GG GG` | clears DTCs: all (`0xFFFFFF`, the default), a group or one DTC |
+
+The mask defaults to `0xFF`: a DTC matches when any of its status bits is set.
+`--mask 0x08` gives the confirmed DTCs, `--mask 0x01` those failing now.
+
+**B19 has no DTCs yet.** Its firmware answers every ReadDTCInformation request
+with only `59` and the sub-function. ISO 14229-1 requires at least the status
+availability mask, so the tool says what is missing instead of failing:
+
+```powershell
+ecu-can uds dtc read --mask 0x08 @tb
+```
+
+**Output (B19)**
+
+```text
+Response [2] 59 02: no status availability mask and no DTCs (shorter than ISO 14229-1 allows)
+```
+
+`dtc count` and `dtc supported` print the same kind of line on B19
+(`Response [2] 59 01: no status availability mask and no count ...`), with exit
+status 0: the board did answer positively.
+
+**What an ECU with stored DTCs returns.** The generic simulated ECU (section 8)
+has three made-up DTCs. The test suite runs `dtc read` against it in one Python
+process. With two adapters on one bench bus, `ecu-can uds simulate --interface
+pcan --channel PCAN_USBBUS1 --tx-id 0x7E0 --rx-id 0x7E8` plays the same ECU for
+a tester on the other adapter with the same IDs.
+
+**Output (simulator: the generic ECU)** of `dtc read`
+
+```text
+Status availability mask 0xFF
+3 DTCs with status & 0xFF:
+  0x0A1B12 P0A1B-12  status 0x24 pendingDTC testFailedSinceLastClear
+  0x9E0013 B1E00-13  status 0x50 testNotCompletedSinceLastClear testNotCompletedThisOperationCycle
+  0xC07300 U0073-00  status 0x09 testFailed confirmedDTC
+```
+
+Each line is the 3-byte DTC in hex, the same DTC as an SAE J2012 code (letter
+P, C, B or U, four characters, then the failure type), and the status byte with
+the names of its set bits:
+
+| Bit | Value | Name |
+|---|---|---|
+| 0 | 0x01 | testFailed |
+| 1 | 0x02 | testFailedThisOperationCycle |
+| 2 | 0x04 | pendingDTC |
+| 3 | 0x08 | confirmedDTC |
+| 4 | 0x10 | testNotCompletedSinceLastClear |
+| 5 | 0x20 | testFailedSinceLastClear |
+| 6 | 0x40 | testNotCompletedThisOperationCycle |
+| 7 | 0x80 | warningIndicatorRequested |
+
+`dtc count --mask 0x08` against the same ECU:
+
+```text
+1 DTC with status & 0x08 (availability mask 0xFF, format 0x01 ISO 14229-1)
+```
+
+`dtc clear` changes the ECU: it erases the DTCs and their stored data.
+
+```powershell
+ecu-can uds dtc clear @tb
+```
+
+**Output (B19)**
+
+```text
+Clear accepted (all DTC groups)
+```
+
+"Accepted" because the tool only sees the answer `54`: B19 sends it, but its
+firmware clears nothing.
+After a clear the simulated DTCs read `status 0x50` (not completed since the
+clear). A DTC the ECU does not know gives
+`negative response 0x31 (RequestOutOfRange)`.
+
+For the other ReadDTCInformation sub-functions (snapshots `19 04`, extended
+data `19 06`, ...) use `raw`, e.g. `ecu-can uds raw "19 04 C0 73 00 FF" @tb`.
+
 ### Common options
 
 | Option | Meaning | Default |
@@ -807,8 +901,8 @@ refuses for about 10 seconds (NRC 0x37). Wait before trying again.
 ## 8. Working without hardware
 
 - `ecu-can demo` and `ecu-can uds demo` check the installation (section 1).
-- The **test suite** runs every command against a simulated generic ECU and a
-  simulated test_board:
+- The **test suite** runs every command against a simulated generic ECU (with
+  three made-up DTCs) and a simulated test_board:
 
   ```powershell
   python -m pytest
@@ -1089,6 +1183,7 @@ ecu-can: profiles\test_board.dbc: 0x100 (BoardStatus) is already defined as Boar
 | `... is already defined as ... in ...` | two DBC files define the same ID | Load only one of them, or fix the files. |
 | `cannot decode: Wrong data size: 2 instead of 8 bytes` | the frame is shorter than its DBC message | Check that the DBC matches the software on the board. |
 | `no DBC files: give --dbc FILE, ...` | a DBC command without a DBC | Add `--dbc` or an `--ecu` profile with `[dbc]`. |
+| `no status availability mask and no DTCs (shorter than ISO 14229-1 allows)` | the ECU answered `59 xx` and nothing more | Not an error of the tool. On B19 this is the firmware's placeholder; it has no DTCs. |
 | `... is not a multiple of its resolution ...` | `dbc encode` / `dbc send` value cannot be sent exactly | Round it to the signal's step (`dbc show` lists it). |
 
 For a closer look at what goes on the bus, put `-v` before `uds`:

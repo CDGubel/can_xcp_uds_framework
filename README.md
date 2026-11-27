@@ -18,6 +18,9 @@ in-process virtual CAN and PEAK PCAN-Basic.
 - **Named DIDs and UDS logs:** a profile's `[dids]` table names DIDs and
   decodes their fields (`read-did PhaseCurrents`, `uds dids`), and `--log`
   records every frame of a `uds` command or shell session.
+- **DTCs:** `uds dtc count`, `read`, `supported` (ReadDTCInformation 0x19) and
+  `clear` (ClearDiagnosticInformation 0x14), with SAE J2012 codes and named
+  status bits.
 
 For a step-by-step guide with real commands and output, see the
 [user's manual](docs/USER_MANUAL.md).
@@ -104,6 +107,8 @@ $ecu = "--interface", "pcan", "--tx-id", "0x7E0", "--rx-id", "0x7E8"
 .\.venv\Scripts\ecu-can.exe uds routine start 0xFF00 "01 02" @ecu
 .\.venv\Scripts\ecu-can.exe uds functional "3E 80" --functional-id 0x7DF @ecu
 .\.venv\Scripts\ecu-can.exe uds unlock 1 --key-file C:\keys\my_ecu.key @ecu
+.\.venv\Scripts\ecu-can.exe uds dtc read --mask 0x08 @ecu
+.\.venv\Scripts\ecu-can.exe uds dtc clear @ecu
 ```
 
 - `session` accepts `default`, `programming`, `extended` or a number, and
@@ -125,6 +130,11 @@ $ecu = "--interface", "pcan", "--tx-id", "0x7E0", "--rx-id", "0x7E8"
 - `functional` sends one single frame to `--functional-id` (7 bytes on
   classic CAN) and lists every response on `--rx-id` within `--listen` seconds
   (default 0.5). `--expect` works as for `raw`.
+- `dtc count|read [--mask M]` (19 01 / 19 02, mask default 0xFF), `dtc
+  supported` (19 0A) and `dtc clear [GROUP]` (14, default all) print each DTC
+  in hex and as an SAE J2012 code with its status bits by name, e.g.
+  `0xC07300 U0073-00  status 0x09 testFailed confirmedDTC`. An answer with
+  less than ISO 14229-1 requires (a bare `59 02`) is reported, not rejected.
 - `unlock LEVEL` requests a seed, computes the key and sends it. An all-zero
   seed means the level is already unlocked. See *SecurityAccess keys* below.
 - Commands exit with status 1 on a negative response, a timeout or an error,
@@ -275,6 +285,7 @@ See section 10 of the [user's manual](docs/USER_MANUAL.md) for examples with out
 - `src/ecu_comm/sim_ecu.py` is the simulated UDS server, and
   `sim_test_board.py` the simulated test_board.
 - `src/ecu_comm/dbc.py` loads DBC files and decodes and encodes frames.
+- `src/ecu_comm/dtc.py` builds DTC requests and parses and formats the answers.
 - `src/ecu_comm/dids.py` checks a profile's `[dids]` table and decodes DID
   values into fields.
 - `src/ecu_comm/ecu_profile.py` loads and checks TOML profiles.
@@ -282,7 +293,7 @@ See section 10 of the [user's manual](docs/USER_MANUAL.md) for examples with out
 - `scripts/make_test_board_log.py` regenerates `examples/test_board_sample.asc`.
 - `tests/` covers raw frames, ISO-TP (single and multi-frame, padding, FD,
   29-bit), UDS against the simulated ECUs, security keys, the CLI, the shell,
-  the profiles, DBC decoding, encoding and log files, named DIDs and UDS logs.
+  the profiles, DBC decoding, encoding and log files, named DIDs, UDS logs and DTCs.
 
 From Python, `open_uds_client` returns a standard `udsoncan` client, so all
 its services are available, including DIDs with your own codecs

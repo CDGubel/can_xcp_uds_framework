@@ -12,6 +12,8 @@ read-did 0xFD10 0xFD11                         # phase currents, sensor addresse
 raw "22 FE ED" --expect "7F 22 31"             # unknown DID
 raw "22 F1" --expect "7F 22 13"                # bad length
 raw "10 05" --expect "7F 10 12"                # unknown session
+raw "19 02 FF" --expect "59 02"                # ReadDTCInformation is answered (no clear: read only)
+raw "19 02" --expect "7F 19 13"                # DTC request too short
 
 session extended
 raw "22 F1 86" --expect "62 F1 86 03"

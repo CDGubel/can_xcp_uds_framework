@@ -20,6 +20,7 @@ from udsoncan.exceptions import (
 # cli imports this module; reading attributes of the module object at call time avoids an import cycle.
 from . import cli
 from . import dids as did_table
+from . import dtc
 from .isotp_link import DEFAULT_PADDING, IsoTpConfig
 from .security import load_secret, resolve_algorithm
 from .sim_ecu import SimulatedEcu, run_simulated_ecu
@@ -61,6 +62,20 @@ def _word(value: str) -> int:
     number = cli.parse_int(value)
     if not 0 <= number <= 0xFFFF:
         raise argparse.ArgumentTypeError("expected a 16-bit identifier")
+    return number
+
+
+def _byte(value: str) -> int:
+    number = cli.parse_int(value)
+    if not 0 <= number <= 0xFF:
+        raise argparse.ArgumentTypeError("expected a byte value, e.g. 0x08")
+    return number
+
+
+def _group(value: str) -> int:
+    number = cli.parse_int(value)
+    if not 0 <= number <= 0xFFFFFF:
+        raise argparse.ArgumentTypeError("expected a 3-byte DTC group, e.g. 0xFFFFFF")
     return number
 
 
@@ -145,6 +160,19 @@ def _add_request_commands(leaves: argparse._SubParsersAction, parents: list[argp
     security = leaves.add_parser("unlock", parents=[*parents, _security_options()],
                                  help="SecurityAccess (0x27): request a seed and send the computed key")
     security.add_argument("level", type=_level, help="odd requestSeed level, e.g. 1")
+
+    dtcs = leaves.add_parser("dtc", help="read or clear diagnostic trouble codes (0x19, 0x14)")
+    dtc_commands = dtcs.add_subparsers(dest="dtc_command", required=True)
+    mask_help = "status mask byte, e.g. 0x08 for confirmed DTCs (default: 0xFF, any status bit)"
+    count = dtc_commands.add_parser("count", parents=parents, help="number of DTCs matching a status mask (19 01)")
+    count.add_argument("--mask", type=_byte, default=0xFF, help=mask_help)
+    read_dtcs = dtc_commands.add_parser("read", parents=parents, help="DTCs matching a status mask (19 02)")
+    read_dtcs.add_argument("--mask", type=_byte, default=0xFF, help=mask_help)
+    dtc_commands.add_parser("supported", parents=parents, help="every DTC the ECU supports, with its status (19 0A)")
+    clear = dtc_commands.add_parser("clear", parents=parents, help="ClearDiagnosticInformation (14): clears DTCs "
+                                                                  "and their stored data on the ECU")
+    clear.add_argument("group", nargs="?", type=_group, default=dtc.ALL_GROUPS,
+                       help="DTC group or single DTC, 3 bytes (default: 0xFFFFFF, all)")
 
     raw = leaves.add_parser("raw", parents=parents, help="send a request as given and print the response")
     raw.add_argument("payload", type=cli.parse_hex_bytes, help='quoted hex request, e.g. "22 F1 90"')
@@ -317,6 +345,8 @@ def _request(connection: Connection, args: argparse.Namespace) -> int:
             print(f"Security level 0x{args.level:02X} unlocked")
         else:
             print(f"Security level 0x{args.level:02X} already unlocked (zero seed)")
+    elif command == "dtc":
+        return _dtc(connection, args)
     elif command == "functional":
         if connection.functional_id is None:
             raise ValueError("functional requests need --functional-id, or an --ecu profile that sets it")
@@ -343,6 +373,36 @@ def _request(connection: Connection, args: argparse.Namespace) -> int:
             return _check_expectation(response.startswith(args.expect) and args.expect != b"",
                                       args.expect, [response])
         return 1 if response[:1] == b"\x7F" else 0
+    return 0
+
+
+def _dtc(connection: Connection, args: argparse.Namespace) -> int:
+    """Send a DTC request; print the result, or the negative response on stderr (exit status 1)."""
+    sub = args.dtc_command
+    if sub == "clear":
+        request = dtc.clear_request(args.group)
+    elif sub == "count":
+        request = dtc.read_request(dtc.REPORT_NUMBER_BY_STATUS_MASK, args.mask)
+    elif sub == "read":
+        request = dtc.read_request(dtc.REPORT_BY_STATUS_MASK, args.mask)
+    else:
+        request = dtc.read_request(dtc.REPORT_SUPPORTED)
+    response = send_raw(connection.client, request)
+    if response[:1] == b"\x7F":
+        print(f"ecu-can: {describe_response(response)}", file=sys.stderr)
+        return 1
+    if sub == "clear":
+        if response != b"\x54":
+            raise ValueError(f"expected 54, got {_hex(response)}")
+        which = "all DTC groups" if args.group == dtc.ALL_GROUPS else f"DTC group 0x{args.group:06X}"
+        print(f"Clear accepted ({which})")
+    elif sub == "count":
+        print(dtc.format_count(dtc.parse_count(response), args.mask, response))
+    else:
+        subfunction = request[1]
+        mask = args.mask if sub == "read" else None
+        for line in dtc.format_list(dtc.parse_list(response, subfunction), subfunction, mask, response):
+            print(line)
     return 0
 
 

@@ -1,6 +1,7 @@
 """A minimal simulated UDS server for development without an ECU.
 
-It answers DiagnosticSessionControl (0x10), ECUReset (0x11), ReadDataByIdentifier
+It answers DiagnosticSessionControl (0x10), ECUReset (0x11), ClearDiagnosticInformation
+(0x14), ReadDTCInformation (0x19: sub-functions 0x01, 0x02 and 0x0A), ReadDataByIdentifier
 (0x22) and TesterPresent (0x3E). Other services get NRC 0x11 serviceNotSupported.
 With a functional ID it also answers functionally addressed single frames, on the
 physical response ID, and drops the NRCs ISO 14229-1 suppresses for them.
@@ -20,6 +21,15 @@ DEFAULT_DIDS = {
     0xF190: b"WSIMULATED0000001",
     0xF195: b"\x01\x02\x03",
 }
+
+# Made-up DTCs (3-byte code: status). Clearing sets every status to "not completed" (0x50).
+DEFAULT_DTCS = {
+    0xC07300: 0x09,   # U0073-00: testFailed, confirmedDTC
+    0x0A1B12: 0x24,   # P0A1B-12: pendingDTC, testFailedSinceLastClear
+    0x9E0013: 0x50,   # B1E00-13: not completed since the last clear
+}
+DTC_STATUS_AVAILABILITY = 0xFF
+DTC_STATUS_CLEARED = 0x50
 
 SERVICE_NOT_SUPPORTED = 0x11
 SUBFUNCTION_NOT_SUPPORTED = 0x12
@@ -42,8 +52,9 @@ SESSION_TIMING = bytes((0x00, 0x32, 0x01, 0xF4))
 
 
 class SimulatedEcu:
-    def __init__(self, dids: dict[int, bytes] | None = None) -> None:
+    def __init__(self, dids: dict[int, bytes] | None = None, dtcs: dict[int, int] | None = None) -> None:
         self.dids = dict(DEFAULT_DIDS if dids is None else dids)
+        self.dtcs = dict(DEFAULT_DTCS if dtcs is None else dtcs)
         self.session = 0x01
 
     def responses(self, request: bytes, functional: bool = False) -> list[bytes]:
@@ -51,7 +62,7 @@ class SimulatedEcu:
         response = self.handle(request)
         if response is None:
             return []
-        if functional and response[:1] == b"" and response[2] in FUNCTIONAL_SUPPRESSED_NRCS:
+        if functional and response[:1] == b"\x7F" and response[2] in FUNCTIONAL_SUPPRESSED_NRCS:
             return []
         return [response]
 
@@ -64,6 +75,10 @@ class SimulatedEcu:
             return self._session(request)
         if sid == 0x11:
             return self._reset(request)
+        if sid == 0x14:
+            return self._clear_dtcs(request)
+        if sid == 0x19:
+            return self._read_dtcs(request)
         if sid == 0x22:
             return self._read_dids(request)
         if sid == 0x3E:
@@ -99,12 +114,51 @@ class SimulatedEcu:
             response += did.to_bytes(2) + self.dids[did]
         return bytes(response)
 
+    def _clear_dtcs(self, request: bytes) -> bytes:
+        if len(request) != 4:
+            return _negative(0x14, INCORRECT_LENGTH)
+        group = int.from_bytes(request[1:4])
+        if group == 0xFFFFFF:
+            cleared = list(self.dtcs)
+        elif group in self.dtcs:
+            cleared = [group]
+        else:
+            return _negative(0x14, REQUEST_OUT_OF_RANGE)
+        for code in cleared:
+            self.dtcs[code] = DTC_STATUS_CLEARED
+        return b"\x54"
+
+    def _read_dtcs(self, request: bytes) -> bytes | None:
+        if len(request) < 2:
+            return _negative(0x19, INCORRECT_LENGTH)
+        subfunction = request[1] & 0x7F
+        if subfunction in (0x01, 0x02):
+            if len(request) != 3:
+                return _negative(0x19, INCORRECT_LENGTH)
+            mask = request[2] & DTC_STATUS_AVAILABILITY
+            matching = {code: status for code, status in self.dtcs.items() if status & mask}
+            if subfunction == 0x01:  # format 0x01: ISO 14229-1
+                body = bytes((DTC_STATUS_AVAILABILITY, 0x01)) + len(matching).to_bytes(2)
+            else:
+                body = bytes((DTC_STATUS_AVAILABILITY,)) + _dtc_records(matching)
+        elif subfunction == 0x0A:
+            if len(request) != 2:
+                return _negative(0x19, INCORRECT_LENGTH)
+            body = bytes((DTC_STATUS_AVAILABILITY,)) + _dtc_records(self.dtcs)
+        else:
+            return _negative(0x19, SUBFUNCTION_NOT_SUPPORTED)
+        return _positive(request, bytes((0x59, subfunction)) + body)
+
     def _tester_present(self, request: bytes) -> bytes | None:
         if len(request) != 2:
             return _negative(0x3E, INCORRECT_LENGTH)
         if request[1] & 0x7F:
             return _negative(0x3E, SUBFUNCTION_NOT_SUPPORTED)
         return _positive(request, b"\x7E\x00")
+
+
+def _dtc_records(dtcs: dict[int, int]) -> bytes:
+    return b"".join(code.to_bytes(3) + bytes((status,)) for code, status in sorted(dtcs.items()))
 
 
 def _positive(request: bytes, response: bytes) -> bytes | None:
