@@ -1,8 +1,8 @@
 # ecu-can User's Manual
 
 `ecu-can` is a command-line tool for bench work on CAN and CAN-FD: raw frames,
-UDS diagnostics over ISO-TP, scripted test sequences, and a simulated ECU for
-work without hardware. This manual takes you from installation to running your
+UDS diagnostics over ISO-TP, scripted test sequences, decoding and encoding with
+DBC files, recorded logs, and a simulated ECU for work without hardware. This manual takes you from installation to running your
 own scripts against a board, with real commands and the output they produce.
 
 **How to read the examples.** Every example is a PowerShell command followed by
@@ -29,8 +29,9 @@ exactly the same form as the single command.
 7. [SecurityAccess keys](#7-securityaccess-keys)
 8. [Working without hardware](#8-working-without-hardware)
 9. [Raw CAN frames](#9-raw-can-frames)
-10. [Troubleshooting](#10-troubleshooting)
-11. [Reference tables](#11-reference-tables)
+10. [DBC files: signals instead of bytes](#10-dbc-files-signals-instead-of-bytes)
+11. [Troubleshooting](#11-troubleshooting)
+12. [Reference tables](#12-reference-tables)
 
 ---
 
@@ -146,6 +147,7 @@ ecu-can uds tester-present --ecu profiles\test_board.toml
   `--channel PCAN_USBBUS1` when the adapter enumerates differently.
 - **New board:** copy `profiles\example_ecu.toml`, which lists every key with a
   comment, and edit it.
+- **DBC files** for decoding go in a `[dbc]` section (section 10).
 - **Typos are caught.** A misspelt key stops the command before anything is
   sent:
 
@@ -693,6 +695,9 @@ refuses for about 10 seconds (NRC 0x37). Wait before trying again.
   python -m pytest
   ```
 
+- `profiles\test_board.dbc` and `examples\test_board_sample.asc` (an invented
+  network and one second of its traffic) let you try every DBC command
+  (section 10).
 - `ecu-can uds simulate --board test_board` makes a PC behave like B19 on a real
   bus. It answers on a second adapter or channel of the same bus, so a tester on
   the first adapter cannot tell it from the board:
@@ -732,7 +737,219 @@ bitrate) on the frame. Classic CAN carries 0 to 8 bytes; CAN-FD carries 0 to 8,
 
 ---
 
-## 10. Troubleshooting
+## 10. DBC files: signals instead of bytes
+
+A DBC file names the messages on a bus and describes their signals: where each
+one sits in the frame, how to scale it, its unit and its value names. With a DBC,
+`ecu-can` shows `SupplyVoltage=24.12 V` instead of `6C 09`, and builds frames
+from values instead of hex.
+
+The project includes an invented network, `profiles\test_board.dbc`, and one
+second of recorded traffic for it, `examples\test_board_sample.asc`. Every
+example in this section runs with them, without hardware. Define once per window:
+
+```powershell
+$d = "--dbc", "profiles\test_board.dbc"
+```
+
+> **Company DBC files stay outside the repository.** Give their full path with
+> `--dbc`, or list them in a profile (see the end of this section).
+
+### dbc show: what a DBC contains
+
+```powershell
+ecu-can dbc show @d BoardStatus 0x18FF0010
+```
+
+**Output (no hardware)**
+
+```text
+0x100 STD CAN [8] BoardStatus (cycle 100 ms; from TestBoard)
+  State: bit 0, 4 bits, Intel, unsigned, [0 .. 3], 0=Init 1=Ready 2=Running 3=Fault
+  Counter: bit 4, 4 bits, Intel, unsigned, [0 .. 15]
+  SupplyVoltage: bit 8, 16 bits, Intel, unsigned, x0.01, [0 .. 655.35] V
+  BoardTemperature: bit 24, 8 bits, Intel, signed, [-128 .. 127] degC
+  FaultActive: bit 32, 1 bit, Intel, unsigned, [0 .. 1]
+
+0x18FF0010 EXT CAN [8] BoardInfo (cycle 1000 ms; from TestBoard)
+  Page: bit 0, 8 bits, Intel, unsigned, [0 .. 255], multiplexer
+  SerialNumber: bit 8, 32 bits, Intel, unsigned, [0 .. 4294967295], when Page = 0
+  SwMajor: bit 8, 8 bits, Intel, unsigned, [0 .. 255], when Page = 1
+  SwMinor: bit 16, 8 bits, Intel, unsigned, [0 .. 255], when Page = 1
+```
+
+Messages can be named or given by ID; with none, every message is listed.
+Each signal line reads: start bit, length, byte order (Intel = little-endian,
+Motorola = big-endian), sign, scaling (`x0.01` means physical = raw x 0.01, an
+offset shows as `+40` or `-40`), range and unit, then any value names. BoardInfo
+is *multiplexed*: the `Page` byte decides which signals the rest of the frame
+holds.
+
+### decode: a recorded log
+
+```powershell
+ecu-can decode @d examples\test_board_sample.asc
+```
+
+**Output (no hardware)**, shortened where marked `...`:
+
+```text
+0.000000 0x18FF0010 EXT CAN [8] 00 51 16 40 00 00 00 00  BoardInfo Page=0, SerialNumber=4200017
+0.001000 0x100 STD CAN [8] 01 6C 09 1F 00 00 00 00  BoardStatus State=Ready, Counter=0, SupplyVoltage=24.12 V, BoardTemperature=31 degC, FaultActive=0
+0.004000 0x200 STD CAN [6] 00 00 00 00 00 00  PhaseCurrents CurrentU=0.0 A, CurrentV=0.0 A, CurrentW=0.0 A
+...
+0.304000 0x200 STD CAN [6] 00 7B FF C2 FF C2  PhaseCurrents CurrentU=12.3 A, CurrentV=-6.2 A, CurrentW=-6.2 A
+...
+0.500000 0x18FF0010 EXT CAN [8] 01 02 07 00 00 00 00 00  BoardInfo Page=1, SwMajor=2, SwMinor=7
+...
+0.620000 0x7FF STD CAN [2] 01 02
+...
+0.750000 0x300 STD FD BRS [12] 01 B8 0B 00 00 00 00 00 90 01 00 00  TesterCommand Mode=Speed, SpeedRequest=1500.0 rpm, TorqueLimit=40.0 Nm
+...
+24 of 24 frames shown
+```
+
+Each line is the raw frame, two spaces, then the message name and its signals.
+An ID the DBC doesn't know (0x7FF here) is shown raw. The last line goes to the
+error stream, so it stays out of anything you redirect to a file.
+
+- **Formats:** `.asc`, `.blf`, `.csv`, `.log`, `.trc` and `.db`; `.mf4` needs the
+  `asammdf` package.
+- **Times** are shown as logged. `--relative` counts from the first frame.
+- Without `--dbc`, `decode` lists the raw frames.
+
+**Filters.** `--message NAME` keeps only those messages; `--signal NAME` keeps
+only those signals, and only the frames that carry them. Both can be repeated:
+
+```powershell
+ecu-can decode @d --signal State --signal CurrentU examples\test_board_sample.asc
+```
+
+**Output (no hardware)**, shortened:
+
+```text
+...
+0.201000 0x100 STD CAN [8] 21 6A 09 1F 00 00 00 00  BoardStatus State=Ready
+0.204000 0x200 STD CAN [6] 00 00 00 00 00 00  PhaseCurrents CurrentU=0.0 A
+0.301000 0x100 STD CAN [8] 32 6C 09 1F 00 00 00 00  BoardStatus State=Running
+...
+0.904000 0x200 STD CAN [6] 00 81 FF C0 FF C0  PhaseCurrents CurrentU=12.9 A
+20 of 24 frames shown
+```
+
+**A table for Excel.** `--csv FILE` writes one row per signal value instead:
+
+```powershell
+ecu-can decode @d --message PhaseCurrents --csv currents.csv examples\test_board_sample.asc
+```
+
+**Output (no hardware)**: the summary, then the first rows of `currents.csv`:
+
+```text
+10 of 24 frames shown, written to currents.csv
+```
+
+```text
+time,id,message,signal,value,unit
+0.004000,0x200,PhaseCurrents,CurrentU,0.0,A
+0.004000,0x200,PhaseCurrents,CurrentV,0.0,A
+0.004000,0x200,PhaseCurrents,CurrentW,0.0,A
+0.104000,0x200,PhaseCurrents,CurrentU,0.0,A
+```
+
+### listen --dbc: live traffic
+
+`listen` takes the same `--dbc`, `--message` and `--signal` options and prints
+the same lines as `decode`, as frames arrive. `--count` counts the frames shown.
+Add `--log FILE` to record every received frame at the same time (`.asc`,
+`.blf`, `.csv` or `.log`); the filters change only what is shown, not what is
+recorded. Decode the recording later with `decode`.
+
+```powershell
+ecu-can listen @tb --dbc C:\networks\board.dbc --duration 60 --log C:\logs\run1.blf
+ecu-can decode --dbc C:\networks\board.dbc --csv C:\logs\run1.csv C:\logs\run1.blf
+```
+
+`listen` never transmits. On B19 the application messages are on the second
+adapter (`--channel PCAN_USBBUS1`), not on the diagnostic bus.
+
+### dbc encode and dbc send: frames from values
+
+`dbc encode` builds a frame and prints it; it needs no bus.
+
+```powershell
+ecu-can dbc encode @d BoardStatus State=Running SupplyVoltage=24.12
+ecu-can dbc encode @d BoardInfo Page=1 SwMajor=2 SwMinor=7
+```
+
+**Output (no hardware)**
+
+```text
+0x100 STD CAN [8] 02 6C 09 00 00 00 00 00  BoardStatus State=Running, Counter=0, SupplyVoltage=24.12 V, BoardTemperature=0 degC, FaultActive=0
+0x18FF0010 EXT CAN [8] 01 02 07 00 00 00 00 00  BoardInfo Page=1, SwMajor=2, SwMinor=7
+```
+
+- **Values** are numbers (`24.12`, `-3`, `0x1F`) or value names (`State=Running`).
+- **Signals you leave out** take their DBC start value, else 0. The printed line
+  always shows every signal, so check it.
+- **Multiplexed messages:** give the multiplexer (`Page=1`); only that page's
+  signals are filled in.
+
+Anything that cannot be sent exactly as written is refused, so nothing is
+silently changed. A value outside the DBC range is refused too.
+
+```powershell
+ecu-can dbc encode @d BoardStatus Counter=1.5
+ecu-can dbc encode @d BoardStatus State=Stopped
+ecu-can dbc encode @d BoardInfo SwMajor=2
+```
+
+**Output (no hardware)**
+
+```text
+ecu-can: Counter=1.5 is not a multiple of its resolution 1
+ecu-can: State has no value named Stopped (Init, Ready, Running, Fault)
+ecu-can: SwMajor is only sent when Page = 1: give Page=... as well
+```
+
+`dbc send` takes the same arguments plus the bus options, and **transmits**. Use
+it only on a bus where that message is expected, such as a bench bus with a
+simulator. `--count N` repeats the frame every `--period` seconds (default: the
+DBC cycle time); `--brs` switches the data bitrate of a CAN-FD message.
+
+```powershell
+ecu-can dbc send @d BoardStatus State=Ready SupplyVoltage=24.1 --count 3 --period 0.1
+```
+
+**Output (no hardware)**, on the default virtual bus:
+
+```text
+Sent x3, every 100 ms 0x100 STD CAN [8] 01 6A 09 00 00 00 00 00  BoardStatus State=Ready, Counter=0, SupplyVoltage=24.10 V, BoardTemperature=0 degC, FaultActive=0
+```
+
+### DBC files in a profile
+
+List the DBC files in the profile instead of typing `--dbc` each time. A
+relative path is resolved from the profile's folder; `--dbc` on the command line
+replaces the list.
+
+```toml
+[dbc]
+files = ["C:/networks/board.dbc", "C:/networks/charger.dbc"]
+```
+
+Several files are loaded together. Two files defining the same ID is an error
+naming both, rather than one silently replacing the other:
+
+**Output (no hardware)**, for `ecu-can dbc show @d --dbc profiles\test_board.dbc`:
+
+```text
+ecu-can: profiles\test_board.dbc: 0x100 (BoardStatus) is already defined as BoardStatus in profiles\test_board.dbc
+```
+
+---
+
+## 11. Troubleshooting
 
 | Message | Meaning | What to do |
 |---|---|---|
@@ -747,13 +964,17 @@ bitrate) on the frame. Classic CAN carries 0 to 8 bytes; CAN-FD carries 0 to 8,
 | `unknown key isotp.txid` (or similar) | typo in a profile | Fix the key; `profiles\example_ecu.toml` lists them all. |
 | `functional requests need --functional-id ...` | no functional ID | Add it to the profile or the command. |
 | `stopped at line N` | a script line failed | The line before it says why. |
+| `... is already defined as ... in ...` | two DBC files define the same ID | Load only one of them, or fix the files. |
+| `cannot decode: Wrong data size: 2 instead of 8 bytes` | the frame is shorter than its DBC message | Check that the DBC matches the software on the board. |
+| `no DBC files: give --dbc FILE, ...` | a DBC command without a DBC | Add `--dbc` or an `--ecu` profile with `[dbc]`. |
+| `... is not a multiple of its resolution ...` | `dbc encode` / `dbc send` value cannot be sent exactly | Round it to the signal's step (`dbc show` lists it). |
 
 For a closer look at what goes on the bus, put `-v` before `uds`:
 `ecu-can -v uds tester-present @tb`.
 
 ---
 
-## 11. Reference tables
+## 12. Reference tables
 
 ### Negative response codes seen on B19
 

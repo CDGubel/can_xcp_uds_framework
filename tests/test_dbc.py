@@ -421,3 +421,14 @@ def test_csv_needs_dbc(monkeypatch, capsys, tmp_path):
     record(monkeypatch, capsys, log)
     assert main(["decode", "--csv", str(tmp_path / "out.csv"), str(log)]) == 1
     assert "--csv needs DBC files" in capsys.readouterr().err
+
+
+def test_sample_log_matches_the_sample_dbc(capsys):
+    """examples/test_board_sample.asc (used in the manual) decodes completely with profiles/test_board.dbc."""
+    sample = Path(__file__).parents[1] / "examples" / "test_board_sample.asc"
+    assert main(["decode", "--dbc", str(SAMPLE_DBC), str(sample)]) == 0
+    captured = capsys.readouterr()
+    lines = captured.out.splitlines()
+    assert captured.err == "24 of 24 frames shown\n"
+    assert lines[0] == "0.000000 0x18FF0010 EXT CAN [8] 00 51 16 40 00 00 00 00  BoardInfo Page=0, SerialNumber=4200017"
+    assert sum("  " in line for line in lines) == 23 and not any("cannot decode" in line for line in lines)
