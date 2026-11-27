@@ -1,0 +1,24 @@
+# Example ECU profile for `ecu-can --ecu profiles/example_ecu.toml ...`.
+# Copy this file for each ECU and adjust it. Command-line options override it.
+
+[bus]
+interface = "pcan"          # "virtual" or "pcan"
+channel = "PCAN_USBBUS1"
+bitrate = 500000
+fd = false
+# data_bitrate = 2000000    # CAN-FD only
+# nominal_sample_point = 80
+# data_sample_point = 75
+
+[isotp]
+tx_id = 0x7E0               # physical request ID (tester -> ECU)
+rx_id = 0x7E8               # response ID (ECU -> tester)
+extended = false            # true for 29-bit IDs
+fd = false                  # true to carry ISO-TP in FD frames (needs bus.fd = true)
+brs = false
+padding = 0xCC              # false to send unpadded frames
+stmin = 0
+blocksize = 0
+
+[uds]
+timeout = 2.0               # seconds per request
