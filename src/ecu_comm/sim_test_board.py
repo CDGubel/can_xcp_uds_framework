@@ -20,7 +20,12 @@ Behaviour copied from the board:
   Sub-function 0x03 repeats the last reply. Other RIDs answer with a bare
   positive response, as the board does;
 * ControlDTCSetting (0x85) and CommunicationControl (0x28) for the functional
-  pre-programming sequence.
+  pre-programming sequence;
+* DTC services as the board's stubs answer them, in any session: ReadDTCInformation
+  (0x19) checks the request length per sub-function (0x13), refuses sub-functions
+  above 0x15 (0x12) and otherwise answers a bare ``59 <sub>`` with no status
+  availability mask and no DTCs; ClearDiagnosticInformation (0x14) needs exactly
+  3 group bytes (0x13) and answers ``54`` without clearing anything.
 
 Assumptions (not checked against the board): WriteDataByIdentifier only accepts
 0xF184 (12 bytes) and needs no unlock; other known DIDs are read-only (0x31).
@@ -80,6 +85,9 @@ TEST_BOARD_DIDS = {
     0xFF00: bytes((0x02, 0x00, 0x00, 0x00)),  # UDS version
 }
 WRITABLE_DIDS = {0xF184: 12}
+# Request length the board expects for each ReadDTCInformation sub-function 0x00..0x15
+# (copied from the board; 0x00 never matches, so it always gets 0x13).
+READ_DTC_LENGTHS = (0, 3, 3, 6, 6, 3, 6, 4, 4, 5, 2, 2, 2, 2, 2, 3, 6, 3, 3, 3, 2, 2)
 
 
 class SimulatedTestBoard(SimulatedEcu):
@@ -93,7 +101,7 @@ class SimulatedTestBoard(SimulatedEcu):
         s3: float = 5.0,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
-        super().__init__(TEST_BOARD_DIDS)
+        super().__init__(TEST_BOARD_DIDS, dtcs={})
         self.secret = secret
         self.levels = levels
         self.max_attempts = max_attempts
@@ -126,6 +134,23 @@ class SimulatedTestBoard(SimulatedEcu):
             0x85: self._control_dtc_setting,
         }.get(request[0])
         return handler(request) if handler else super().handle(request)
+
+    # -- DTCs: the board's stubs ---------------------------------------------------
+
+    def _read_dtcs(self, request: bytes) -> bytes | None:
+        if len(request) < 2:
+            return _negative(0x19, INCORRECT_LENGTH)
+        subfunction = request[1] & 0x7F
+        if subfunction >= len(READ_DTC_LENGTHS):
+            return _negative(0x19, SUBFUNCTION_NOT_SUPPORTED)
+        if READ_DTC_LENGTHS[subfunction] != len(request):
+            return _negative(0x19, INCORRECT_LENGTH)
+        return _positive(request, bytes((0x59, subfunction)))
+
+    def _clear_dtcs(self, request: bytes) -> bytes:
+        if len(request) != 4:
+            return _negative(0x14, INCORRECT_LENGTH)
+        return b"\x54"
 
     def _enter_session(self, session: int) -> None:
         self.session = session
