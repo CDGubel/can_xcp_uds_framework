@@ -400,7 +400,7 @@ option record. It prints the routine status record the ECU returns.
 
 > **B19:** routine 0xFD00 sends transactions to the current sensors and can
 > write their EEPROM, which cannot be undone. Never run it on a board fitted
-> with sensors.
+> with sensors. B19 has its three sensors fitted, so 0xFD00 is not sent to it.
 
 ### unlock: SecurityAccess (0x27)
 
@@ -418,7 +418,31 @@ Run on its own in the default session, it is refused:
 ecu-can: negative response 0x7F (ServiceNotSupportedInActiveSession)
 ```
 
-Run it from the shell after `session extended` (section 6).
+Run it from the shell after `session extended` (section 6). Here the four
+commands are piped into the shell, with the key in a file outside the project:
+
+```powershell
+"session extended", "unlock 1", "unlock 1", "session default" | ecu-can uds shell @tb --key-file C:\keys\test_board.key
+```
+
+**Output (B19)**
+
+```text
+> session extended
+Session 0x03 (extended) active. P2 = 100 ms, P2* = 2000 ms.
+> unlock 1
+Security level 0x01 unlocked
+> unlock 1
+Security level 0x01 already unlocked (zero seed)
+> session default
+Session 0x01 (default) active. P2 = 100 ms, P2* = 2000 ms.
+```
+
+The second `unlock 1` gets an all-zero seed: the level is already open, so no
+key is sent. Returning to the default session locks the board again.
+
+> **B19:** level 1 unlocks only on a development build. On a standard build the
+> board answers the key with NRC 0x22 (ConditionsNotCorrect), whatever the key.
 
 ### raw: any request
 
@@ -560,6 +584,10 @@ A script is a text file with one command per line, usually with the `.uds`
 extension. The shell prints each line before running it and **stops at the
 first failure** with exit status 1, so a script is also a test.
 
+For a few commands you don't need a file: pipe them in as quoted strings
+separated by commas, and they run the same way. Section 5 (`unlock`) has an
+example on B19.
+
 Example `scripts\my_write.uds`, which unlocks, writes a DID and reads it back:
 
 ```text
@@ -591,7 +619,7 @@ Security level 0x01 unlocked
 
 Running `unlock 1` a second time prints
 `Security level 0x01 already unlocked (zero seed)`: the ECU sends an all-zero
-seed when the level is already open.
+seed when the level is already open (B19 does the same, see section 5).
 
 ### When a script stops
 
