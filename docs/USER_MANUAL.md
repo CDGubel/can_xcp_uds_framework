@@ -359,7 +359,7 @@ One request per DID, in order. It stops at the first refusal.
 ecu-can uds read-did 0xFEED @tb
 ```
 
-**Output (simulator, B19 pending)**
+**Output (B19)**
 
 ```text
 ecu-can: negative response 0x31 (RequestOutOfRange)
@@ -414,7 +414,7 @@ Requests a seed for the level (odd numbers: 1, 3, ...), computes the key and
 sends it. Needs the secret key (section 7) and, on B19, the extended session.
 Run on its own in the default session, it is refused:
 
-**Output (simulator, B19 pending)**
+**Output (B19)**
 
 ```text
 ecu-can: negative response 0x7F (ServiceNotSupportedInActiveSession)
@@ -491,7 +491,7 @@ Exit status 0. When the response differs, the command says what it wanted:
 ecu-can uds raw "22 F1 86" --expect "62 F1 86 03" @tb
 ```
 
-**Output (simulator, B19 pending)**
+**Output (B19)**
 
 ```text
 Response [4] 62 F1 86 01 (positive response)
@@ -535,7 +535,7 @@ Without it, the ECU answers:
 ecu-can uds functional "3E 00" @tb
 ```
 
-**Output (simulator, B19 pending)**
+**Output (B19)**
 
 ```text
 Response [2] 7E 00 (positive response)
