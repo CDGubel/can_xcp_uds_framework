@@ -1,0 +1,29 @@
+# Bench "test_board": UDS on the PT-CAN bus, classic CAN at 500 kbit/s.
+#   ecu-can uds shell --ecu profiles/test_board.toml scripts/test_board_readonly.uds
+# The simulator answers the same way:
+#   ecu-can uds simulate --board test_board --interface virtual --channel tb
+
+[bus]
+interface = "pcan"
+channel = "PCAN_USBBUS2"    # the USB-CANFD adapter on PT-CAN
+bitrate = 500000
+fd = false
+
+[isotp]
+tx_id = 0x60A               # physical requests
+rx_id = 0x68A               # responses (also to functional requests)
+functional_id = 0x601       # functional requests, single frame only
+padding = 0xAA
+stmin = 0
+blocksize = 0
+
+[uds]
+timeout = 2.0               # P2* of the board is 2 s
+keep_alive = 2.0            # S3 is 5 s: send TesterPresent well inside it
+
+[security]
+algorithm = "aes128-ecb"
+# The secret key is never stored in this repository. Set ECU_COMM_SECURITY_KEY,
+# pass --key-file, or point key_file at a file outside the repository
+# (a relative path is resolved against this profile's folder):
+# key_file = "../../keys/test_board.key"

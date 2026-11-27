@@ -5,3 +5,7 @@ __pycache__/
 *.egg-info/
 build/
 dist/
+
+# Secret keys for SecurityAccess stay out of the repository
+*.key
+keys/

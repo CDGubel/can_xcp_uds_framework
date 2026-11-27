@@ -10,7 +10,7 @@ from uuid import uuid4
 import can
 
 from . import uds_cli
-from .ecu_profile import load_profile
+from .ecu_profile import empty_profile, load_profile
 from .transport import BusConfig, make_frame, open_bus, send_frame
 
 LIBRARY_LOGGERS = ("UdsClient", "Connection", "isotp")
@@ -103,7 +103,7 @@ def _parser() -> argparse.ArgumentParser:
 
 
 def load_args_profile(args: argparse.Namespace) -> dict[str, dict]:
-    return load_profile(args.ecu) if getattr(args, "ecu", None) else {"bus": {}, "isotp": {}, "uds": {}}
+    return load_profile(args.ecu) if getattr(args, "ecu", None) else empty_profile()
 
 
 def pick(args: argparse.Namespace, section: dict, name: str, default):

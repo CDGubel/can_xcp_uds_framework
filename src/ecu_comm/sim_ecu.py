@@ -2,6 +2,8 @@
 
 It answers DiagnosticSessionControl (0x10), ECUReset (0x11), ReadDataByIdentifier
 (0x22) and TesterPresent (0x3E). Other services get NRC 0x11 serviceNotSupported.
+With a functional ID it also answers functionally addressed single frames, on the
+physical response ID, and drops the NRCs ISO 14229-1 suppresses for them.
 """
 
 import threading
@@ -10,7 +12,7 @@ from contextlib import contextmanager
 
 import can
 
-from .isotp_link import IsoTpConfig, open_isotp
+from .isotp_link import IsoTpConfig, build_stack, bus_notifier
 
 DEFAULT_DIDS = {
     0xF187: b"SIM-PART-0001",
@@ -23,6 +25,17 @@ SERVICE_NOT_SUPPORTED = 0x11
 SUBFUNCTION_NOT_SUPPORTED = 0x12
 INCORRECT_LENGTH = 0x13
 REQUEST_OUT_OF_RANGE = 0x31
+SUBFUNCTION_NOT_SUPPORTED_IN_SESSION = 0x7E
+SERVICE_NOT_SUPPORTED_IN_SESSION = 0x7F
+
+# Negative responses an ECU does not send to functionally addressed requests.
+FUNCTIONAL_SUPPRESSED_NRCS = {
+    SERVICE_NOT_SUPPORTED,
+    SUBFUNCTION_NOT_SUPPORTED,
+    REQUEST_OUT_OF_RANGE,
+    SUBFUNCTION_NOT_SUPPORTED_IN_SESSION,
+    SERVICE_NOT_SUPPORTED_IN_SESSION,
+}
 
 # P2 = 50 ms, P2* = 5000 ms (sent in 10 ms units).
 SESSION_TIMING = bytes((0x00, 0x32, 0x01, 0xF4))
@@ -33,10 +46,14 @@ class SimulatedEcu:
         self.dids = dict(DEFAULT_DIDS if dids is None else dids)
         self.session = 0x01
 
-    def responses(self, request: bytes) -> list[bytes]:
+    def responses(self, request: bytes, functional: bool = False) -> list[bytes]:
         """All payloads to send for ``request``. Override to add e.g. NRC 0x78 first."""
         response = self.handle(request)
-        return [] if response is None else [response]
+        if response is None:
+            return []
+        if functional and response[:1] == b"" and response[2] in FUNCTIONAL_SUPPRESSED_NRCS:
+            return []
+        return [response]
 
     def handle(self, request: bytes) -> bytes | None:
         """Return the response payload, or None when the response is suppressed."""
@@ -101,23 +118,38 @@ def _negative(sid: int, nrc: int) -> bytes:
 
 @contextmanager
 def run_simulated_ecu(
-    bus: can.BusABC, config: IsoTpConfig, ecu: SimulatedEcu | None = None
+    bus: can.BusABC,
+    config: IsoTpConfig,
+    ecu: SimulatedEcu | None = None,
+    functional_id: int | None = None,
 ) -> Iterator[SimulatedEcu]:
     """Serve UDS requests on ``bus`` in a background thread.
 
-    ``config`` is the tester's view of the link; the ECU listens on its tx_id.
+    ``config`` is the tester's view of the link; the ECU listens on its tx_id and,
+    when ``functional_id`` is given, also on that ID (responses go to rx_id).
     """
     ecu = ecu or SimulatedEcu()
     stop = threading.Event()
+    if functional_id is not None and functional_id in (config.tx_id, config.rx_id):
+        raise ValueError("the functional ID must differ from the physical request and response IDs")
 
-    with open_isotp(bus, config.reversed()) as stack:
+    with bus_notifier(bus) as notifier:
+        physical = build_stack(bus, notifier, config.reversed())
+        stacks = [(physical, False)]
+        if functional_id is not None:
+            functional = IsoTpConfig(**{**config.__dict__, "tx_id": config.rx_id, "rx_id": functional_id})
+            stacks.append((build_stack(bus, notifier, functional), True))
+
         def serve() -> None:
             while not stop.is_set():
-                request = stack.recv(block=True, timeout=0.05)
-                if request is not None:
-                    for response in ecu.responses(bytes(request)):
-                        stack.send(response)
+                for stack, is_functional in stacks:
+                    request = stack.recv(block=not is_functional, timeout=0.02)
+                    if request is not None:
+                        for response in ecu.responses(bytes(request), functional=is_functional):
+                            physical.send(response)
 
+        for stack, _ in stacks:
+            stack.start()
         thread = threading.Thread(target=serve, name="simulated-ecu", daemon=True)
         thread.start()
         try:
@@ -125,3 +157,5 @@ def run_simulated_ecu(
         finally:
             stop.set()
             thread.join(timeout=1.0)
+            for stack, _ in stacks:
+                stack.stop()

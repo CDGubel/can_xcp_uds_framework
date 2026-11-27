@@ -110,3 +110,139 @@ def test_invalid_profile_reported_by_cli(tmp_path, capsys):
     path.write_text("[bus]\nbitrate = \"fast\"\n")
     assert main(["listen", "--ecu", str(path)]) == 1
     assert "bus.bitrate has the wrong type" in capsys.readouterr().err
+
+
+# -- test_board: shell, functional addressing, security ---------------------------------
+
+TEST_BOARD_PROFILE = Path(__file__).parents[1] / "profiles" / "test_board.toml"
+READONLY_SCRIPT = Path(__file__).parents[1] / "scripts" / "test_board_readonly.uds"
+
+
+@pytest.fixture
+def board_channel(monkeypatch):
+    """The simulated test_board on a fresh virtual channel; no secret in the environment."""
+    from ecu_comm.sim_test_board import TEST_BOARD_FUNCTIONAL_ID, TEST_BOARD_LINK, SimulatedTestBoard
+
+    monkeypatch.delenv("ECU_COMM_SECURITY_KEY", raising=False)
+    channel = uuid4().hex
+    with open_bus(BusConfig(channel=channel)) as bus, \
+            run_simulated_ecu(bus, TEST_BOARD_LINK, SimulatedTestBoard(), TEST_BOARD_FUNCTIONAL_ID) as ecu:
+        yield channel, ecu
+
+
+def run_board(channel, command, *args):
+    return main(["uds", command, "--ecu", str(TEST_BOARD_PROFILE), "--interface", "virtual",
+                 "--channel", channel, "--timeout", "0.5", *args])
+
+
+def test_test_board_profile_loads():
+    profile = load_profile(TEST_BOARD_PROFILE)
+    assert profile["bus"]["channel"] == "PCAN_USBBUS2"
+    assert profile["isotp"] == {"tx_id": 0x60A, "rx_id": 0x68A, "functional_id": 0x601, "padding": 0xAA,
+                                "stmin": 0, "blocksize": 0}
+    assert profile["security"] == {"algorithm": "aes128-ecb"}
+
+
+def test_readonly_bench_script_passes_on_the_simulator(board_channel, capsys):
+    channel, ecu = board_channel
+    assert run_board(channel, "shell", str(READONLY_SCRIPT)) == 0
+    out = capsys.readouterr().out
+    assert "> sleep 6" in out and out.count("No response") == 2
+    assert ecu.session == 0x01
+
+
+def test_shell_unlock_routine_and_write(board_channel, tmp_path, capsys):
+    from ecu_comm.sim_test_board import SIM_SECRET
+
+    channel, ecu = board_channel
+    key_file = tmp_path / "sim.key"
+    key_file.write_text(SIM_SECRET.hex(" "))
+    script = tmp_path / "calibrate.uds"
+    script.write_text(
+        "session extended\n"
+        "unlock 1\n"
+        "unlock 1   # a second unlock sees the zero seed\n"
+        'routine start 0xFD00 "00 01 02 06"\n'
+        "routine result 0xFD00\n"
+        'write-did 0xF184 "41 42 43 44 45 46 47 48 49 4A 4B 4C"\n'
+        'raw "31 01 FD 00 00 01 06 06" --expect "7F 31 31"\n'
+    )
+    assert run_board(channel, "shell", "--key-file", str(key_file), str(script)) == 0
+    lines = [line for line in capsys.readouterr().out.splitlines() if not line.startswith(">")]
+    assert lines == [
+        "Session 0x03 (extended) active. P2 = 100 ms, P2* = 2000 ms.",
+        "Security level 0x01 unlocked",
+        "Security level 0x01 already unlocked (zero seed)",
+        "Routine 0xFD00 start: [3] 03 36 02",
+        "Routine 0xFD00 result: [3] 03 36 02",
+        "0xF184 written [12] 41 42 43 44 45 46 47 48 49 4A 4B 4C",
+        "Response [3] 7F 31 31 (negative response 0x31 (RequestOutOfRange))",
+    ]
+    assert ecu.dids[0xF184] == b"ABCDEFGHIJKL"
+
+
+def test_shell_stops_at_the_first_failure(board_channel, tmp_path, capsys):
+    channel, _ = board_channel
+    script = tmp_path / "fails.uds"
+    script.write_text('tester-present\nroutine start 0xFD00 "00 01 02 06"\ntester-present\n')
+    assert run_board(channel, "shell", "--keep-alive", "0", str(script)) == 1
+    captured = capsys.readouterr()
+    assert captured.out.count("Tester present OK") == 1
+    assert captured.err.splitlines() == ["ecu-can: negative response 0x7F (ServiceNotSupportedInActiveSession)",
+                                         "ecu-can: stopped at line 2"]
+
+
+@pytest.mark.parametrize("line,message", [("read-did", "the following arguments are required"),
+                                         ("bogus", "invalid choice"), ('raw "22 F1', "No closing quotation")])
+def test_shell_reports_bad_lines(board_channel, tmp_path, capsys, line, message):
+    channel, _ = board_channel
+    script = tmp_path / "bad.uds"
+    script.write_text(f"\n# comment\n{line}\n")
+    assert run_board(channel, "shell", str(script)) == 1
+    err = capsys.readouterr().err
+    assert "line 3" in err and message in err
+
+
+def test_unlock_needs_a_secret(board_channel, capsys):
+    channel, _ = board_channel
+    assert run_board(channel, "session", "extended") == 0
+    assert run_board(channel, "unlock", "1") == 1
+    assert "ECU_COMM_SECURITY_KEY" in capsys.readouterr().err
+
+
+def test_unlock_with_plugin_algorithm_and_environment_secret(board_channel, monkeypatch, tmp_path, capsys):
+    from ecu_comm.sim_test_board import SIM_SECRET
+
+    channel, ecu = board_channel
+    monkeypatch.setenv("ECU_COMM_SECURITY_KEY", SIM_SECRET.hex())
+    script = tmp_path / "unlock.uds"
+    script.write_text("session extended\nunlock 1 --key-algorithm ecu_comm.security:aes128_ecb\n")
+    assert run_board(channel, "shell", "--keep-alive", "0", str(script)) == 0
+    assert "Security level 0x01 unlocked" in capsys.readouterr().out
+    assert ecu.unlocked == 0x01
+
+
+def test_functional_command(board_channel, capsys):
+    channel, ecu = board_channel
+    assert run_board(channel, "functional", "10 03") == 0
+    assert run_board(channel, "functional", "3E 80", "--expect", "none") == 0
+    assert run_board(channel, "functional", "3E 00", "--expect", "none") == 1
+    captured = capsys.readouterr()
+    assert captured.out.splitlines() == [
+        "Response [6] 50 03 00 64 00 C8 (positive response)",
+        "No response",
+        "Response [2] 7E 00 (positive response)",
+    ]
+    assert captured.err == "ecu-can: expected no response, got 7E 00\n"
+    assert ecu.session == 0x03
+
+
+def test_functional_needs_an_id(ecu_channel, capsys):
+    assert run_uds(ecu_channel, "functional", "3E 80") == 1
+    assert "--functional-id" in capsys.readouterr().err
+
+
+def test_profile_key_file_is_relative_to_the_profile(tmp_path):
+    profile = tmp_path / "board.toml"
+    profile.write_text('[security]\nkey_file = "keys/board.key"\n')
+    assert load_profile(profile)["security"]["key_file"] == str(tmp_path / "keys" / "board.key")
