@@ -26,3 +26,17 @@ timeout = 2.0               # seconds per request
 # [dbc]
 # files = ["test_board.dbc"]  # for listen and dbc show; relative to this profile's folder.
 #                             # Keep company DBC files outside the repository and give their full path.
+
+# Named DIDs: read-did and write-did accept the names, and read-did decodes the fields.
+# Types: uint8/16/24/32, int8/16/24/32 (big-endian), ascii and bytes (with a length; the
+# last field may leave it out to take the rest). List them: ecu-can uds dids --ecu PROFILE
+# [dids.0xF190]
+# name = "VIN"
+# fields = [{ name = "VIN", type = "ascii", length = 17 }]
+#
+# [dids.0x0101]
+# name = "BoardStatus"
+# fields = [
+#     { name = "Temperature", type = "int16", scale = 0.1, offset = -40, unit = "degC" },
+#     { name = "Mode", type = "uint8", choices = { 0 = "off", 1 = "on" } },
+# ]

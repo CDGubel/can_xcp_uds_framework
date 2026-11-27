@@ -15,6 +15,9 @@ in-process virtual CAN and PEAK PCAN-Basic.
 - **DBC:** decoding with `cantools` (`listen --dbc`, `decode` for recorded
   logs with CSV export), `dbc show`, and frames built from signal values
   (`dbc encode`, `dbc send`); `listen --log` records traffic.
+- **Named DIDs and UDS logs:** a profile's `[dids]` table names DIDs and
+  decodes their fields (`read-did PhaseCurrents`, `uds dids`), and `--log`
+  records every frame of a `uds` command or shell session.
 
 For a step-by-step guide with real commands and output, see the
 [user's manual](docs/USER_MANUAL.md).
@@ -105,8 +108,13 @@ $ecu = "--interface", "pcan", "--tx-id", "0x7E0", "--rx-id", "0x7E8"
 
 - `session` accepts `default`, `programming`, `extended` or a number, and
   `reset` accepts `hard`, `key-off-on`, `soft` or a number.
-- `read-did` sends one request per DID and prints each value as hex, plus
-  ASCII text when every byte is printable.
+- `read-did` sends one request per DID and prints each value as hex as it
+  arrives, plus ASCII text when every byte is printable. With a `[dids]` table
+  in the profile (below), DIDs can be given by name and their fields are
+  decoded: `0xFD10 PhaseCurrents [6] 00 31 00 2D 00 47  U=4.9 A, V=4.5 A, W=7.1 A`.
+- `--log FILE` (`.asc`, `.blf`, `.csv`, `.log`) on any `uds` command or the
+  shell records every frame sent and received. On PEAK adapters sent frames
+  are recorded from the adapter's echo, so both directions share its clock.
 - `raw` sends the bytes exactly as given and prints the response, including
   negative responses. It waits through NRC 0x78 (response pending). With
   `--expect HEX` it succeeds only when the response starts with those bytes
@@ -137,6 +145,22 @@ command (`send`, `listen` and `uds`) accepts `--ecu`:
 
 ```powershell
 .\.venv\Scripts\ecu-can.exe uds read-did 0xF190 --ecu profiles\my_ecu.toml
+```
+
+A `[dids]` table names DIDs and describes their fields (big-endian integers
+with scale, offset, unit and named values; `ascii`; `bytes`). `read-did` and
+`write-did` then accept the names, and `ecu-can uds dids --ecu PROFILE` lists
+the table without a bus. The format is described in the
+[user's manual](docs/USER_MANUAL.md#naming-dids) and in `src/ecu_comm/dids.py`:
+
+```toml
+[dids.0xFD10]
+name = "PhaseCurrents"
+fields = [
+    { name = "U", type = "int16", scale = 0.1, unit = "A" },
+    { name = "V", type = "int16", scale = 0.1, unit = "A" },
+    { name = "W", type = "int16", scale = 0.1, unit = "A" },
+]
 ```
 
 ### SecurityAccess keys
@@ -251,12 +275,14 @@ See section 10 of the [user's manual](docs/USER_MANUAL.md) for examples with out
 - `src/ecu_comm/sim_ecu.py` is the simulated UDS server, and
   `sim_test_board.py` the simulated test_board.
 - `src/ecu_comm/dbc.py` loads DBC files and decodes and encodes frames.
+- `src/ecu_comm/dids.py` checks a profile's `[dids]` table and decodes DID
+  values into fields.
 - `src/ecu_comm/ecu_profile.py` loads and checks TOML profiles.
 - `src/ecu_comm/cli.py` and `uds_cli.py` provide the `ecu-can` commands.
 - `scripts/make_test_board_log.py` regenerates `examples/test_board_sample.asc`.
 - `tests/` covers raw frames, ISO-TP (single and multi-frame, padding, FD,
   29-bit), UDS against the simulated ECUs, security keys, the CLI, the shell,
-  the profiles, and DBC decoding, encoding and log files.
+  the profiles, DBC decoding, encoding and log files, named DIDs and UDS logs.
 
 From Python, `open_uds_client` returns a standard `udsoncan` client, so all
 its services are available, including DIDs with your own codecs

@@ -22,10 +22,16 @@ Command-line options override profile values. Example:
 
     [dbc]
     files = ["my_ecu.dbc", "C:/networks/body.dbc"]   # relative to this profile's folder
+
+    [dids.0xF190]                                     # see ecu_comm.dids for the field types
+    name = "VIN"
+    fields = [{ name = "VIN", type = "ascii", length = 17 }]
 """
 
 import tomllib
 from pathlib import Path
+
+from .dids import parse_table
 
 SECTIONS = {
     "bus": {
@@ -40,14 +46,18 @@ SECTIONS = {
     "security": {"algorithm": str, "key_file": str},
     "dbc": {"files": list},
 }
+# [dids] holds one table per DID; ecu_comm.dids checks it.
+FREE_FORM_SECTIONS = ("dids",)
 
 
 def empty_profile() -> dict[str, dict]:
-    return {section: {} for section in SECTIONS}
+    return {section: {} for section in (*SECTIONS, *FREE_FORM_SECTIONS)}
 
 
 def load_profile(path: str | Path) -> dict[str, dict]:
-    """Return one dict per section (bus, isotp, uds, security, dbc) with checked key names and types.
+    """Return one dict per section (bus, isotp, uds, security, dbc, dids) with checked key names and types.
+
+    ``dids`` maps each DID number to its ``ecu_comm.dids.DidDefinition``.
 
     A relative ``security.key_file`` or ``dbc.files`` entry is resolved against the profile's folder.
     """
@@ -57,7 +67,7 @@ def load_profile(path: str | Path) -> dict[str, dict]:
         except tomllib.TOMLDecodeError as exc:
             raise ValueError(f"{path}: {exc}") from exc
 
-    unknown = set(data) - set(SECTIONS)
+    unknown = set(data) - set(SECTIONS) - set(FREE_FORM_SECTIONS)
     if unknown:
         raise ValueError(f"{path}: unknown section(s): {', '.join(sorted(unknown))}")
 
@@ -79,6 +89,13 @@ def load_profile(path: str | Path) -> dict[str, dict]:
         if section == "isotp" and values.get("padding") is True:
             raise ValueError(f"{path}: isotp.padding must be a byte value or false")
         profile[section] = dict(values)
+    dids = data.get("dids", {})
+    if not isinstance(dids, dict):
+        raise ValueError(f"{path}: [dids] must be a table")
+    try:
+        profile["dids"] = parse_table(dids)
+    except ValueError as exc:
+        raise ValueError(f"{path}: {exc}") from None
     if profile["isotp"].get("padding") is False:
         profile["isotp"]["padding"] = None
     if "key_file" in profile["security"]:
