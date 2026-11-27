@@ -9,7 +9,7 @@ description = "ECU-independent CAN, CAN-FD, ISO-TP, UDS and DBC tools for bench 
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
-    "python-can>=4.6.1,<5",
+    "python-can[pcan]>=4.6.1,<5",   # [pcan] adds uptime: PEAK timestamps in wall-clock time
     "can-isotp>=2.0.7,<3",
     "udsoncan>=1.26.1,<2",
     "cantools>=45.2,<46",
