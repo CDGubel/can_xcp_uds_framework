@@ -22,3 +22,7 @@ blocksize = 0
 
 [uds]
 timeout = 2.0               # seconds per request
+
+# [dbc]
+# files = ["test_board.dbc"]  # for listen and dbc show; relative to this profile's folder.
+#                             # Keep company DBC files outside the repository and give their full path.

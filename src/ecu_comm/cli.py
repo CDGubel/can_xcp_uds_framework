@@ -4,12 +4,14 @@ import argparse
 import logging
 import math
 import sys
+from dataclasses import dataclass
 from time import monotonic
 from uuid import uuid4
 
 import can
 
 from . import uds_cli
+from .dbc import Network, decode, describe_message, format_decoded, load_dbc
 from .ecu_profile import empty_profile, load_profile
 from .transport import BusConfig, make_frame, open_bus, send_frame
 
@@ -78,6 +80,16 @@ def _bus_options() -> argparse.ArgumentParser:
     return options
 
 
+def _dbc_options(with_profile: bool = False) -> argparse.ArgumentParser:
+    options = argparse.ArgumentParser(add_help=False)
+    group = options.add_argument_group("DBC options")
+    if with_profile:
+        group.add_argument("--ecu", metavar="PROFILE.toml", help="take the DBC files from a profile's [dbc] section")
+    group.add_argument("--dbc", action="append", metavar="FILE",
+                       help="DBC file to decode with (repeat for more; replaces the profile's dbc.files)")
+    return options
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CAN, CAN-FD and UDS bench tools")
     parser.add_argument("-v", "--verbose", action="store_true", help="show ISO-TP and UDS library logs")
@@ -91,9 +103,20 @@ def _parser() -> argparse.ArgumentParser:
     tx.add_argument("--frame-fd", action="store_true", help="send an FD frame (requires --fd)")
     tx.add_argument("--brs", action="store_true", help="switch data bitrate (requires --frame-fd)")
 
-    rx = commands.add_parser("listen", parents=[bus_options], help="display received frames")
+    rx = commands.add_parser("listen", parents=[bus_options, _dbc_options()], help="display received frames")
     rx.add_argument("--duration", type=positive_seconds, default=5.0, help="total seconds (default: 5)")
-    rx.add_argument("--count", type=_nonnegative_int, default=0, help="stop after this many frames (0: no limit)")
+    rx.add_argument("--count", type=_nonnegative_int, default=0,
+                    help="stop after this many displayed frames (0: no limit)")
+    rx.add_argument("--message", action="append", metavar="NAME",
+                    help="show only this DBC message (repeat for more)")
+    rx.add_argument("--signal", action="append", metavar="NAME",
+                    help="show only this DBC signal, and only frames that carry it (repeat for more)")
+
+    dbc = commands.add_parser("dbc", help="inspect DBC files")
+    dbc_commands = dbc.add_subparsers(dest="dbc_command", required=True)
+    show = dbc_commands.add_parser("show", parents=[_dbc_options(with_profile=True)],
+                                   help="list the messages and signals of DBC files")
+    show.add_argument("messages", nargs="*", metavar="MESSAGE", help="message names or IDs (default: all)")
 
     demo = commands.add_parser("demo", help="send and receive a frame on two in-process virtual buses")
     demo.add_argument("--fd", action="store_true", help="exercise an FD frame with bitrate switching")
@@ -135,18 +158,90 @@ def format_frame(frame: can.Message) -> str:
     ).rstrip()
 
 
-def _listen(bus: can.BusABC, duration: float, count: int) -> None:
+def load_network(args: argparse.Namespace, profile: dict[str, dict]) -> Network | None:
+    """The DBC files from --dbc, else from the profile; None when there are none."""
+    files = args.dbc or profile["dbc"].get("files")
+    return load_dbc(files) if files else None
+
+
+@dataclass(frozen=True)
+class FrameFilter:
+    """Which frames and signals ``listen`` shows. None means no restriction."""
+
+    messages: set[str] | None = None
+    signals: set[str] | None = None
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace, network: Network | None) -> "FrameFilter":
+        if (args.message or args.signal) and network is None:
+            raise ValueError("--message and --signal need DBC files (--dbc, or dbc.files in the --ecu profile)")
+        messages = set(args.message) if args.message else None
+        for name in messages or ():
+            network.find(name)
+        signals = set(args.signal) if args.signal else None
+        if signals:
+            known = {signal.name for message in network.messages.values() for signal in message.signals}
+            unknown = sorted(signals - known)
+            if unknown:
+                raise ValueError(f"no signal named {', '.join(unknown)} in the DBC files")
+        return cls(messages, signals)
+
+    def line(self, frame: can.Message, network: Network | None) -> str | None:
+        """The text to print for a frame, or None to skip it."""
+        decoded = decode(network, frame) if network is not None else None
+        restricted = self.messages is not None or self.signals is not None
+        if decoded is None:
+            return None if restricted else format_frame(frame)
+        if self.messages is not None and decoded.message.name not in self.messages:
+            return None
+        if self.signals is not None and decoded.error is None and not self.signals & decoded.values.keys():
+            return None
+        return f"{format_frame(frame)}  {format_decoded(decoded, self.signals)}"
+
+
+def _listen(bus: can.BusABC, duration: float, count: int, network: Network | None = None,
+            frame_filter: FrameFilter = FrameFilter()) -> None:
     deadline = monotonic() + duration
-    received = 0
-    while not count or received < count:
+    shown = 0
+    while not count or shown < count:
         remaining = deadline - monotonic()
         if remaining <= 0:
             break
         frame = bus.recv(timeout=remaining)
         if frame is None:
             break
-        print(f"{frame.timestamp:.6f} {format_frame(frame)}", flush=True)
-        received += 1
+        line = frame_filter.line(frame, network)
+        if line is None:
+            continue
+        print(f"{frame.timestamp:.6f} {line}", flush=True)
+        shown += 1
+
+
+def _dbc_show(args: argparse.Namespace, profile: dict[str, dict]) -> None:
+    network = load_network(args, profile)
+    if network is None:
+        raise ValueError("no DBC files: give --dbc FILE, or an --ecu profile with dbc.files")
+    if args.messages:
+        messages = [_find_message(network, text) for text in args.messages]
+    else:
+        messages = network.sorted_messages()
+    for index, message in enumerate(messages):
+        if index:
+            print()
+        print("\n".join(describe_message(message)))
+
+
+def _find_message(network: Network, text: str):
+    try:
+        frame_id = parse_int(text)
+    except argparse.ArgumentTypeError:
+        return network.find(text)
+    matches = [message for (mid, _), message in network.messages.items() if mid == frame_id]
+    if not matches:
+        raise ValueError(f"no message with ID {text} in the DBC files")
+    if len(matches) > 1:
+        raise ValueError(f"ID {text} is both an 11-bit and a 29-bit message: give the message name")
+    return matches[0]
 
 
 def _demo(fd: bool) -> None:
@@ -178,6 +273,9 @@ def main(argv: list[str] | None = None) -> int:
         profile = load_args_profile(args)
         if args.command == "uds":
             return uds_cli.run(args, profile)
+        if args.command == "dbc":
+            _dbc_show(args, profile)
+            return 0
 
         config = bus_config(args, profile)
         if args.command == "send":
@@ -188,8 +286,10 @@ def main(argv: list[str] | None = None) -> int:
                 send_frame(bus, frame)
             print(f"Sent {format_frame(frame)}")
         else:
+            network = load_network(args, profile)
+            frame_filter = FrameFilter.from_args(args, network)
             with open_bus(config) as bus:
-                _listen(bus, args.duration, args.count)
+                _listen(bus, args.duration, args.count, network, frame_filter)
     except KeyboardInterrupt:
         return 130
     except (can.CanError, OSError, ValueError, RuntimeError) as exc:

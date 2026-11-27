@@ -1,0 +1,50 @@
+VERSION ""
+
+
+NS_ :
+
+BS_:
+
+BU_: TestBoard Tester
+
+
+BO_ 256 BoardStatus: 8 TestBoard
+ SG_ State : 0|4@1+ (1,0) [0|3] "" Tester
+ SG_ Counter : 4|4@1+ (1,0) [0|15] "" Tester
+ SG_ SupplyVoltage : 8|16@1+ (0.01,0) [0|655.35] "V" Tester
+ SG_ BoardTemperature : 24|8@1- (1,0) [-128|127] "degC" Tester
+ SG_ FaultActive : 32|1@1+ (1,0) [0|1] "" Tester
+
+BO_ 512 PhaseCurrents: 6 TestBoard
+ SG_ CurrentU : 7|16@0- (0.1,0) [-3276.8|3276.7] "A" Tester
+ SG_ CurrentV : 23|16@0- (0.1,0) [-3276.8|3276.7] "A" Tester
+ SG_ CurrentW : 39|16@0- (0.1,0) [-3276.8|3276.7] "A" Tester
+
+BO_ 2566848528 BoardInfo: 8 TestBoard
+ SG_ Page M : 0|8@1+ (1,0) [0|255] "" Tester
+ SG_ SerialNumber m0 : 8|32@1+ (1,0) [0|4294967295] "" Tester
+ SG_ SwMajor m1 : 8|8@1+ (1,0) [0|255] "" Tester
+ SG_ SwMinor m1 : 16|8@1+ (1,0) [0|255] "" Tester
+
+BO_ 768 TesterCommand: 12 Tester
+ SG_ Mode : 0|8@1+ (1,0) [0|2] "" TestBoard
+ SG_ SpeedRequest : 8|16@1- (0.5,0) [-16384|16383.5] "rpm" TestBoard
+ SG_ TorqueLimit : 64|16@1+ (0.1,0) [0|6553.5] "Nm" TestBoard
+
+
+CM_ "Invented example network for the ecu-can framework. It describes no real product.";
+CM_ BO_ 256 "Cyclic status of the board.";
+CM_ BO_ 512 "Phase currents, big-endian (Motorola) signals.";
+CM_ BO_ 2566848528 "Multiplexed board information on a 29-bit ID: Page 0 serial number, Page 1 software version.";
+CM_ BO_ 768 "CAN-FD command from the tester, 12 bytes.";
+BA_DEF_ BO_ "GenMsgCycleTime" INT 0 10000;
+BA_DEF_ BO_ "VFrameFormat" ENUM "StandardCAN","ExtendedCAN","reserved","J1939PG","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","reserved","StandardCAN_FD","ExtendedCAN_FD";
+BA_DEF_DEF_ "GenMsgCycleTime" 0;
+BA_DEF_DEF_ "VFrameFormat" "StandardCAN";
+BA_ "GenMsgCycleTime" BO_ 256 100;
+BA_ "GenMsgCycleTime" BO_ 512 10;
+BA_ "GenMsgCycleTime" BO_ 2566848528 1000;
+BA_ "VFrameFormat" BO_ 2566848528 1;
+BA_ "VFrameFormat" BO_ 768 14;
+VAL_ 256 State 0 "Init" 1 "Ready" 2 "Running" 3 "Fault" ;
+VAL_ 768 Mode 0 "Off" 1 "Speed" 2 "Torque" ;
