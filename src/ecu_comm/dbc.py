@@ -85,6 +85,95 @@ def encode(message: "Message", values: dict[str, object]) -> bytes:
         raise ValueError(f"{message.name}: {exc}") from exc
 
 
+def parse_assignments(message: "Message", texts: list[str]) -> dict[str, object]:
+    """Turn ``Signal=value`` texts into values: numbers (decimal, 0x hex, float) or choice names."""
+    values: dict[str, object] = {}
+    for text in texts:
+        name, sep, raw = text.partition("=")
+        name, raw = name.strip(), raw.strip()
+        if not sep or not name or not raw:
+            raise ValueError(f"expected Signal=value, got {text!r}")
+        try:
+            signal = message.get_signal_by_name(name)
+        except KeyError:
+            raise ValueError(f"{message.name} has no signal {name} "
+                             f"(signals: {', '.join(s.name for s in message.signals)})") from None
+        if name in values:
+            raise ValueError(f"{name} is given twice")
+        values[name] = _parse_value(signal, raw)
+        _check_resolution(signal, values[name])
+    return values
+
+
+def _check_resolution(signal: "Signal", value: object) -> None:
+    """Refuse a number that the signal cannot carry exactly; cantools would round it silently."""
+    if isinstance(value, str) or signal.is_float:
+        return
+    raw = (value - signal.offset) / signal.scale
+    if abs(raw - round(raw)) > 1e-6 * max(1.0, abs(raw)):
+        raise ValueError(f"{signal.name}={value} is not a multiple of its resolution {_number(signal.scale)}"
+                         + (f" (offset {_number(signal.offset)})" if signal.offset else ""))
+
+
+def complete_values(message: "Message", given: dict[str, object]) -> dict[str, object]:
+    """Add the signals that were not given, at their DBC start value (else raw 0).
+
+    For a multiplexed message only the signals of the selected page are added, and a
+    given signal of another page is an error.
+    """
+    values = dict(given)
+    while True:
+        active = [s for s in message.signals if s.multiplexer_signal is None
+                  or (s.multiplexer_signal in values and _raw_choice(message, s.multiplexer_signal, values)
+                      in s.multiplexer_ids)]
+        added = False
+        for signal in active:
+            if signal.name not in values:
+                values[signal.name] = _default(signal)
+                added = True
+        if not added:
+            break
+    inactive = sorted(set(values) - {s.name for s in active})
+    if inactive:
+        signal = message.get_signal_by_name(inactive[0])
+        pages = ", ".join(str(i) for i in signal.multiplexer_ids)
+        raise ValueError(f"{signal.name} is only sent when {signal.multiplexer_signal} = {pages}: "
+                         f"give {signal.multiplexer_signal}=... as well")
+    return {s.name: values[s.name] for s in message.signals if s.name in values}
+
+
+def _parse_value(signal: "Signal", text: str) -> object:
+    try:
+        return int(text, 0)
+    except ValueError:
+        pass
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    names = [str(choice) for choice in (signal.choices or {}).values()]
+    if text in names:
+        return text
+    if names:
+        raise ValueError(f"{signal.name} has no value named {text} ({', '.join(names)})")
+    raise ValueError(f"{signal.name} needs a number, got {text!r}")
+
+
+def _default(signal: "Signal") -> object:
+    if signal.initial is not None:
+        return signal.initial
+    return signal.raw_to_scaled(0, decode_choices=False)
+
+
+def _raw_choice(message: "Message", name: str, values: dict[str, object]) -> object:
+    """The raw value of a multiplexer signal, which may have been given as a choice name."""
+    value = values[name]
+    signal = message.get_signal_by_name(name)
+    if isinstance(value, str):
+        return next(key for key, choice in signal.choices.items() if str(choice) == value)
+    return value
+
+
 def format_value(signal: "Signal", value: object) -> str:
     """A value with as many decimals as the signal's scale and offset need, and its unit."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):

@@ -225,3 +225,101 @@ def test_listen_without_dbc_is_unchanged(monkeypatch, capsys):
 def test_listen_filter_errors(capsys, options, message):
     assert main(["listen", "--channel", uuid4().hex, "--duration", "0.1", *options]) == 1
     assert message in capsys.readouterr().err
+
+
+# -- ecu-can dbc encode / dbc send -------------------------------------------------------
+
+
+def encode_cli(capsys, *args):
+    status = main(["dbc", "encode", "--dbc", str(SAMPLE_DBC), *args])
+    captured = capsys.readouterr()
+    return status, captured.out.rstrip("\n"), captured.err.rstrip("\n")
+
+
+def test_encode_prints_the_frame_and_all_signals(capsys):
+    assert encode_cli(capsys, "TesterCommand", "Mode=Speed", "SpeedRequest=-100.5", "TorqueLimit=12.3") == (
+        0, "0x300 STD FD [12] 01 37 FF 00 00 00 00 00 7B 00 00 00  "
+           "TesterCommand Mode=Speed, SpeedRequest=-100.5 rpm, TorqueLimit=12.3 Nm", "")
+
+
+def test_encode_fills_missing_signals_and_takes_hex(capsys):
+    assert encode_cli(capsys, "0x100", "State=Running", "SupplyVoltage=24.12", "Counter=0xF") == (
+        0, "0x100 STD CAN [8] F2 6C 09 00 00 00 00 00  "
+           "BoardStatus State=Running, Counter=15, SupplyVoltage=24.12 V, BoardTemperature=0 degC, FaultActive=0", "")
+
+
+def test_encode_multiplexed_page(capsys):
+    assert encode_cli(capsys, "BoardInfo", "Page=1", "SwMajor=2")[1] == (
+        "0x18FF0010 EXT CAN [8] 01 02 00 00 00 00 00 00  BoardInfo Page=1, SwMajor=2, SwMinor=0")
+    assert encode_cli(capsys, "BoardInfo")[1] == (
+        "0x18FF0010 EXT CAN [8] 00 00 00 00 00 00 00 00  BoardInfo Page=0, SerialNumber=0")
+
+
+def test_encode_uses_the_dbc_start_value(tmp_path, capsys):
+    dbc = tmp_path / "start.dbc"
+    dbc.write_text('BO_ 16 Temps: 2 A\n SG_ Coolant : 0|8@1+ (0.5,-40) [-40|87.5] "degC" B\n'
+                   ' SG_ Oil : 8|8@1+ (1,-40) [-40|215] "degC" B\n\n'
+                   'BA_DEF_ SG_ "GenSigStartValue" INT 0 255;\nBA_DEF_DEF_ "GenSigStartValue" 0;\n'
+                   'BA_ "GenSigStartValue" SG_ 16 Oil 100;\n')
+    assert main(["dbc", "encode", "--dbc", str(dbc), "Temps"]) == 0
+    # Oil starts at raw 100 = 60 degC; Coolant has no start value, so raw 0 = -40 degC.
+    assert capsys.readouterr().out == "0x010 STD CAN [2] 00 64  Temps Coolant=-40.0 degC, Oil=60 degC\n"
+
+
+@pytest.mark.parametrize("args,message", [
+    (["BoardStatus", "State=Nope"], "State has no value named Nope (Init, Ready, Running, Fault)"),
+    (["BoardStatus", "Volts=3"], "BoardStatus has no signal Volts (signals: State, Counter, SupplyVoltage, "
+                                 "BoardTemperature, FaultActive)"),
+    (["BoardStatus", "SupplyVoltage"], "expected Signal=value, got 'SupplyVoltage'"),
+    (["BoardStatus", "Counter=1", "Counter=2"], "Counter is given twice"),
+    (["BoardStatus", "Counter=1.5"], "Counter=1.5 is not a multiple of its resolution 1"),
+    (["BoardStatus", "SupplyVoltage=24.125"], "SupplyVoltage=24.125 is not a multiple of its resolution 0.01"),
+    (["BoardStatus", "SupplyVoltage=700"], 'value smaller than or equal to 655.35'),
+    (["BoardStatus", "Counter=fast"], "Counter needs a number, got 'fast'"),
+    (["BoardInfo", "SwMajor=2"], "SwMajor is only sent when Page = 1: give Page=... as well"),
+    (["BoardInfo", "Page=1", "SerialNumber=5"], "SerialNumber is only sent when Page = 0"),
+    (["NoSuchMessage"], "no message named NoSuchMessage"),
+])
+def test_encode_errors(capsys, args, message):
+    status, out, err = encode_cli(capsys, *args)
+    assert status == 1 and out == "" and message in err
+
+
+def send_cli(monkeypatch, capsys, fd, *args):
+    import ecu_comm.cli as cli
+
+    config = BusConfig(channel=uuid4().hex, fd=fd)
+    with open_bus(config) as receiver, open_bus(config) as sender:
+        monkeypatch.setattr(cli, "open_bus", lambda config: sender)
+        status = main(["dbc", "send", "--dbc", str(SAMPLE_DBC), "--channel", config.channel, *args])
+        frames = []
+        while (frame := receiver.recv(timeout=0.1)) is not None:
+            frames.append(frame)
+    captured = capsys.readouterr()
+    return status, frames, captured.out, captured.err
+
+
+def test_send_one_frame(monkeypatch, capsys):
+    status, frames, out, _ = send_cli(monkeypatch, capsys, False, "PhaseCurrents", "CurrentU=1.3", "CurrentW=-6.3")
+    assert status == 0 and len(frames) == 1
+    assert frames[0].arbitration_id == 0x200 and frames[0].data == bytes.fromhex("00 0D 00 00 FF C1")
+    assert out == ("Sent 0x200 STD CAN [6] 00 0D 00 00 FF C1  "
+                   "PhaseCurrents CurrentU=1.3 A, CurrentV=0.0 A, CurrentW=-6.3 A\n")
+
+
+def test_send_repeats_at_the_period(monkeypatch, capsys):
+    status, frames, out, _ = send_cli(monkeypatch, capsys, False, "BoardInfo", "Page=1", "SwMajor=3",
+                                      "--count", "3", "--period", "0.05")
+    assert status == 0 and len(frames) == 3 and all(f.is_extended_id for f in frames)
+    gaps = [b.timestamp - a.timestamp for a, b in zip(frames, frames[1:])]
+    assert all(0.04 <= gap <= 0.1 for gap in gaps), gaps
+    assert out.startswith("Sent x3, every 50 ms 0x18FF0010 EXT CAN [8] 01 03 00")
+
+
+def test_send_fd_message(monkeypatch, capsys):
+    status, frames, out, _ = send_cli(monkeypatch, capsys, True, "TesterCommand", "Mode=Torque", "--fd", "--brs")
+    assert status == 0 and frames[0].is_fd and frames[0].bitrate_switch and len(frames[0].data) == 12
+    status, frames, _, err = send_cli(monkeypatch, capsys, False, "TesterCommand", "Mode=Torque")
+    assert status == 1 and frames == [] and "an FD frame requires a bus opened in CAN-FD mode" in err
+    status, frames, _, err = send_cli(monkeypatch, capsys, False, "BoardStatus", "--brs")
+    assert status == 1 and frames == [] and "--brs needs a CAN-FD message" in err

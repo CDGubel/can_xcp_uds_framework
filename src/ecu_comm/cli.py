@@ -5,13 +5,22 @@ import logging
 import math
 import sys
 from dataclasses import dataclass
-from time import monotonic
+from time import monotonic, sleep
 from uuid import uuid4
 
 import can
 
 from . import uds_cli
-from .dbc import Network, decode, describe_message, format_decoded, load_dbc
+from .dbc import (
+    Network,
+    complete_values,
+    decode,
+    describe_message,
+    encode,
+    format_decoded,
+    load_dbc,
+    parse_assignments,
+)
 from .ecu_profile import empty_profile, load_profile
 from .transport import BusConfig, make_frame, open_bus, send_frame
 
@@ -54,6 +63,13 @@ def _sample_point(value: str) -> float:
     if not 50 <= percent < 100:
         raise argparse.ArgumentTypeError("expected a percentage from 50 up to 100 (exclusive)")
     return percent
+
+
+def _positive_int(value: str) -> int:
+    count = int(value)
+    if count < 1:
+        raise argparse.ArgumentTypeError("expected a positive count")
+    return count
 
 
 def _nonnegative_int(value: str) -> int:
@@ -117,6 +133,20 @@ def _parser() -> argparse.ArgumentParser:
     show = dbc_commands.add_parser("show", parents=[_dbc_options(with_profile=True)],
                                    help="list the messages and signals of DBC files")
     show.add_argument("messages", nargs="*", metavar="MESSAGE", help="message names or IDs (default: all)")
+    assignments_help = ("Signal=value: a number (12.5, -3, 0x1F) or a value name (State=Running); "
+                        "signals left out take their DBC start value, else 0")
+    encode = dbc_commands.add_parser("encode", parents=[_dbc_options(with_profile=True)],
+                                     help="build a frame from signal values and print it (no bus)")
+    encode.add_argument("message", metavar="MESSAGE", help="message name or ID")
+    encode.add_argument("values", nargs="*", metavar="SIGNAL=VALUE", help=assignments_help)
+    dbc_send = dbc_commands.add_parser("send", parents=[bus_options, _dbc_options()],
+                                       help="build a frame from signal values and send it")
+    dbc_send.add_argument("message", metavar="MESSAGE", help="message name or ID")
+    dbc_send.add_argument("values", nargs="*", metavar="SIGNAL=VALUE", help=assignments_help)
+    dbc_send.add_argument("--brs", action="store_true", help="switch data bitrate (CAN-FD messages only)")
+    dbc_send.add_argument("--count", type=_positive_int, default=1, help="frames to send (default: 1)")
+    dbc_send.add_argument("--period", type=positive_seconds, metavar="SECONDS",
+                          help="seconds between frames when --count > 1 (default: the DBC cycle time, else 0.1)")
 
     demo = commands.add_parser("demo", help="send and receive a frame on two in-process virtual buses")
     demo.add_argument("--fd", action="store_true", help="exercise an FD frame with bitrate switching")
@@ -231,6 +261,37 @@ def _dbc_show(args: argparse.Namespace, profile: dict[str, dict]) -> None:
         print("\n".join(describe_message(message)))
 
 
+def _dbc_frame(args: argparse.Namespace, profile: dict[str, dict]):
+    """The frame built from MESSAGE and SIGNAL=VALUE arguments, its decoded text and the DBC message."""
+    network = load_network(args, profile)
+    if network is None:
+        raise ValueError("no DBC files: give --dbc FILE, or an --ecu profile with dbc.files")
+    message = _find_message(network, args.message)
+    values = complete_values(message, parse_assignments(message, args.values))
+    brs = getattr(args, "brs", False)
+    if brs and not message.is_fd:
+        raise ValueError(f"--brs needs a CAN-FD message; {message.name} is classic CAN")
+    frame = make_frame(message.frame_id, encode(message, values), extended=message.is_extended_frame,
+                       fd=message.is_fd, brs=brs)
+    return frame, format_decoded(decode(network, frame)), message
+
+
+def _dbc_send(args: argparse.Namespace, profile: dict[str, dict]) -> None:
+    frame, text, message = _dbc_frame(args, profile)
+    period = args.period or (message.cycle_time / 1000 if message.cycle_time else 0.1)
+    with open_bus(bus_config(args, profile)) as bus:
+        next_time = monotonic()
+        for index in range(args.count):
+            if index:
+                next_time += period
+                delay = next_time - monotonic()
+                if delay > 0:
+                    sleep(delay)
+            send_frame(bus, frame)
+    repeat = f" x{args.count}, every {period * 1000:g} ms" if args.count > 1 else ""
+    print(f"Sent{repeat} {format_frame(frame)}  {text}")
+
+
 def _find_message(network: Network, text: str):
     try:
         frame_id = parse_int(text)
@@ -274,7 +335,13 @@ def main(argv: list[str] | None = None) -> int:
         if args.command == "uds":
             return uds_cli.run(args, profile)
         if args.command == "dbc":
-            _dbc_show(args, profile)
+            if args.dbc_command == "show":
+                _dbc_show(args, profile)
+            elif args.dbc_command == "encode":
+                frame, text, _ = _dbc_frame(args, profile)
+                print(f"{format_frame(frame)}  {text}")
+            else:
+                _dbc_send(args, profile)
             return 0
 
         config = bus_config(args, profile)
