@@ -97,8 +97,10 @@ Every command has built-in help: `ecu-can --help`, `ecu-can uds --help`,
    `0xF190` and `61840` are the same DID.
 2. **Byte strings** are hex pairs in quotes: `"22 F1 90"`. Spaces are optional
    (`"22F190"` works) but make output easier to compare.
-3. **Output format.** `[n]` is a length in bytes. DID values print as hex, plus
-   the text in quotes when every byte is printable.
+3. **Output format.** `[n]` is a length in bytes. DID values print as hex.
+   When the profile names the DID (section 3), its name comes before the length
+   and its fields after the bytes; otherwise the text follows in quotes when
+   every byte is printable.
 4. **Exit status.** Each command exits with 0 on success and 1 on a negative
    response, a timeout or an error, so scripts and CI can test it. In
    PowerShell, read it with `$LASTEXITCODE`.
@@ -148,6 +150,7 @@ ecu-can uds tester-present --ecu profiles\test_board.toml
 - **New board:** copy `profiles\example_ecu.toml`, which lists every key with a
   comment, and edit it.
 - **DBC files** for decoding go in a `[dbc]` section (section 10).
+- **DID names and fields** go in a `[dids]` table (below).
 - **Typos are caught.** A misspelt key stops the command before anything is
   sent:
 
@@ -165,6 +168,59 @@ ecu-can uds tester-present @tb
 ```
 
 `@tb` expands to the two words in the variable. Define it once per window.
+
+### Naming DIDs
+
+A `[dids]` table gives each DID a name and describes its fields, so `read-did`
+shows values instead of bare bytes, and `read-did` and `write-did` accept the
+name instead of the number. The test_board profile names 13 DIDs, for example:
+
+```toml
+[dids.0xFD10]
+name = "PhaseCurrents"
+fields = [
+    { name = "U", type = "int16", scale = 0.1, unit = "A" },
+    { name = "V", type = "int16", scale = 0.1, unit = "A" },
+    { name = "W", type = "int16", scale = 0.1, unit = "A" },
+]
+
+[dids.0xF186]
+name = "ActiveSession"
+fields = [{ name = "Session", type = "uint8", choices = { 1 = "default", 2 = "programming", 3 = "extended" } }]
+```
+
+| Field key | Meaning |
+|---|---|
+| `name` | one word, unique within the DID |
+| `type` | `uint8`, `uint16`, `uint24`, `uint32`, `int8`, `int16`, `int24`, `int32` (big-endian, as UDS sends them), `ascii` or `bytes` |
+| `length` | bytes, for `ascii` and `bytes` only; the last field may leave it out to take the rest |
+| `scale`, `offset` | physical value = raw x scale + offset (numbers only) |
+| `unit` | printed after the value |
+| `choices` | names for raw values, e.g. `{ 0 = "no", 1 = "yes" }` |
+
+The fields are read in order, from the first byte. A DID with only a `name` is
+still printed as bytes, under its name. Names are matched without regard to
+case (`vin` finds `VIN`). Mistakes in the table stop the command before
+anything is sent, for example `dids.0xF190: name must be one word`.
+
+List the table without a bus:
+
+```powershell
+ecu-can uds dids @tb PhaseCurrents 0xF186
+```
+
+**Output (no hardware)**
+
+```text
+0xFD10 PhaseCurrents [6]
+  U: int16, x0.1 A
+  V: int16, x0.1 A
+  W: int16, x0.1 A
+0xF186 ActiveSession [1]
+  Session: uint8, 1=default 2=programming 3=extended
+```
+
+Without names it lists every DID in the table.
 
 ---
 
@@ -195,12 +251,13 @@ ecu-can uds read-did 0xF1A0 0xF186 @tb
 **Output (B19)**
 
 ```text
-0xF1A0 [1] 02
-0xF186 [1] 01
+0xF1A0 ActiveImage [1] 02  Image=application
+0xF186 ActiveSession [1] 01  Session=default
 ```
 
-`0xF1A0 = 02` means the application is running (not the bootloader), and
-`0xF186 = 01` means the default session.
+The application is running (not the bootloader), in the default session. The
+names and values come from the profile's `[dids]` table; the bytes are what the
+board sent.
 
 ### Step 3: identification
 
@@ -211,16 +268,16 @@ ecu-can uds read-did 0xF110 0xF111 0xF112 0xF189 0xF195 @tb
 **Output (B19)**
 
 ```text
-0xF110 [3] 01 00 00
-0xF111 [3] 00 00 00
-0xF112 [3] 00 00 00
-0xF189 [3] 01 01 01
-0xF195 [3] 01 01 01
+0xF110 CalibrationVersion [3] 01 00 00  Major=1, Minor=0, Patch=0
+0xF111 BootloaderVersion [3] 00 00 00  Major=0, Minor=0, Patch=0
+0xF112 HardwareVersion [3] 00 00 00  Major=0, Minor=0, Patch=0
+0xF189 SoftwareVersion [3] 01 01 01  Major=1, Minor=1, Patch=1
+0xF195 SupplierSoftwareVersion [3] 01 01 01  Major=1, Minor=1, Patch=1
 ```
 
 These are the version DIDs, three bytes each. On B19 the fingerprints, serial
 number and VIN (0xF183, 0xF184, 0xF18C, 0xF190) read as all zeros because they
-have not been programmed. Zeros are not printed as text.
+have not been programmed, so their text is empty: `VIN=""`.
 
 ### Step 4: run the full read-only check
 
@@ -242,19 +299,19 @@ Response [4] 62 F1 A0 02 (positive response)
 > raw '22 F1 86' --expect '62 F1 86 01'
 Response [4] 62 F1 86 01 (positive response)
 > read-did 0xF110 0xF111 0xF112 0xF189 0xF195
-0xF110 [3] 01 00 00
-0xF111 [3] 00 00 00
-0xF112 [3] 00 00 00
-0xF189 [3] 01 01 01
-0xF195 [3] 01 01 01
+0xF110 CalibrationVersion [3] 01 00 00  Major=1, Minor=0, Patch=0
+0xF111 BootloaderVersion [3] 00 00 00  Major=0, Minor=0, Patch=0
+0xF112 HardwareVersion [3] 00 00 00  Major=0, Minor=0, Patch=0
+0xF189 SoftwareVersion [3] 01 01 01  Major=1, Minor=1, Patch=1
+0xF195 SupplierSoftwareVersion [3] 01 01 01  Major=1, Minor=1, Patch=1
 > read-did 0xF183 0xF184 0xF18C 0xF190
-0xF183 [12] 00 00 00 00 00 00 00 00 00 00 00 00
-0xF184 [12] 00 00 00 00 00 00 00 00 00 00 00 00
-0xF18C [12] 00 00 00 00 00 00 00 00 00 00 00 00
-0xF190 [17] 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00
+0xF183 BootFingerprint [12] 00 00 00 00 00 00 00 00 00 00 00 00  Fingerprint=""
+0xF184 AppFingerprint [12] 00 00 00 00 00 00 00 00 00 00 00 00  Fingerprint=""
+0xF18C SerialNumber [12] 00 00 00 00 00 00 00 00 00 00 00 00  Serial=""
+0xF190 VIN [17] 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  VIN=""
 > read-did 0xFD10 0xFD11
-0xFD10 [6] 00 0D 00 24 00 3F
-0xFD11 [4] 00 00 00 00
+0xFD10 PhaseCurrents [6] 00 2C 00 30 00 44  U=4.4 A, V=4.8 A, W=6.8 A
+0xFD11 SensorAddresses [4] 00 00 00 00  U=0, V=0, W=0, Found=no
 > raw '22 FE ED' --expect '7F 22 31'
 Response [3] 7F 22 31 (negative response 0x31 (RequestOutOfRange))
 > raw '22 F1' --expect '7F 22 13'
@@ -285,6 +342,9 @@ Response [4] 62 F1 86 01 (positive response)
 Exit status 0 means every line got the answer it expected. Note `sleep 6`: it
 waits longer than S3, yet the board stays in the extended session because the
 shell keeps sending TesterPresent in the background.
+
+The phase currents are live values: B19 reads a few amperes with no current
+flowing, and they change from one read to the next.
 
 ### Step 5: the automated checks
 
@@ -353,7 +413,26 @@ Tester present OK
 
 ### read-did: ReadDataByIdentifier (0x22)
 
-One request per DID, in order. It stops at the first refusal.
+One request per DID, in order. Give each DID as a number or as a name from the
+profile's `[dids]` table (section 3):
+
+```powershell
+ecu-can uds read-did PhaseCurrents SensorAddresses vin @tb
+```
+
+**Output (B19)**
+
+```text
+0xFD10 PhaseCurrents [6] 00 31 00 2D 00 47  U=4.9 A, V=4.5 A, W=7.1 A
+0xFD11 SensorAddresses [4] 00 00 00 00  U=0, V=0, W=0, Found=no
+0xF190 VIN [17] 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00  VIN=""
+```
+
+A DID the table does not name prints as bytes. When the board sends a length
+the table does not expect, the line ends in
+`(cannot decode: expected 6 bytes, got 2)` instead of a guess.
+
+Values are printed as they arrive; the command stops at the first refusal:
 
 ```powershell
 ecu-can uds read-did 0xFEED @tb
@@ -371,7 +450,8 @@ ecu-can: negative response 0x31 (RequestOutOfRange)
 ecu-can uds write-did 0xF184 "41 42 43 44 45 46 47 48 49 4A 4B 4C" @tb
 ```
 
-The value is given as hex bytes and must have the length the ECU expects.
+The value is given as hex bytes and must have the length the ECU expects. The
+DID can be a name from the profile, for example `write-did AppFingerprint "..."`.
 Writes usually need the extended session and an unlocked security level, so in
 practice you run them from the shell (see the example in section 6).
 
@@ -553,6 +633,7 @@ Response [2] 7E 00 (positive response)
 | `--functional-id` | functional request ID | from the profile |
 | `--padding 0xAA\|none` | frame padding byte | 0xCC |
 | `--timeout S` | seconds to wait for a response | 2 |
+| `--log FILE` | record every frame sent and received (section 6) | off |
 | `-v` (before `uds`) | show ISO-TP and UDS library logs | off |
 
 ---
@@ -612,11 +693,11 @@ Session 0x03 (extended) active. P2 = 100 ms, P2* = 2000 ms.
 > unlock 1
 Security level 0x01 unlocked
 > read-did 0xF184
-0xF184 [12] 41 50 50 4C 2D 46 50 2D 30 30 30 31 "APPL-FP-0001"
+0xF184 AppFingerprint [12] 41 50 50 4C 2D 46 50 2D 30 30 30 31  Fingerprint="APPL-FP-0001"
 > write-did 0xF184 '41 42 43 44 45 46 47 48 49 4A 4B 4C'
 0xF184 written [12] 41 42 43 44 45 46 47 48 49 4A 4B 4C
 > read-did 0xF184
-0xF184 [12] 41 42 43 44 45 46 47 48 49 4A 4B 4C "ABCDEFGHIJKL"
+0xF184 AppFingerprint [12] 41 42 43 44 45 46 47 48 49 4A 4B 4C  Fingerprint="ABCDEFGHIJKL"
 ```
 
 Running `unlock 1` a second time prints
@@ -631,7 +712,7 @@ The failing line is named, and nothing after it runs:
 > tester-present
 Tester present OK
 > read-did 0xF1A0
-0xF1A0 [1] 02
+0xF1A0 ActiveImage [1] 02  Image=application
 > session programing
 ecu-can: line 3: uds> session: argument session: expected a decimal or 0x-prefixed integer
 ecu-can: stopped at line 3
@@ -647,6 +728,44 @@ Here `programing` is misspelt, so it was read as a number and rejected.
   `session default` to leave the board as you found it.
 - Use `--keep-alive 0` on the shell command line to test what the board does
   without TesterPresent, for example the S3 timeout.
+
+### Recording a session: --log
+
+`--log FILE` on any `uds` command, or on the shell, records every frame of the
+conversation: requests, flow control, responses, functional requests and the
+shell's TesterPresent. The extension picks the format: `.asc`, `.blf`, `.csv`
+or `.log`. Read it back with `ecu-can decode` (section 10), or open it in a
+CAN tool. Sent and received frames share one clock: on a PEAK adapter both are
+stamped by the adapter.
+
+```powershell
+ecu-can uds shell @tb scripts\test_board_readonly.uds --log C:\logs\b19_readonly.blf
+ecu-can decode C:\logs\b19_readonly.blf --relative
+```
+
+**Output (B19)** of the `decode` command, shortened to its first 12 lines:
+
+```text
+67 of 67 frames shown
+0.000000 0x60A STD CAN [8] 02 3E 00 AA AA AA AA AA
+0.001278 0x68A STD CAN [8] 02 7E 00 AA AA AA AA AA
+0.003194 0x60A STD CAN [8] 03 22 F1 A0 AA AA AA AA
+0.004980 0x68A STD CAN [8] 04 62 F1 A0 02 AA AA AA
+0.006852 0x60A STD CAN [8] 03 22 F1 86 AA AA AA AA
+0.009289 0x68A STD CAN [8] 04 62 F1 86 01 AA AA AA
+0.011059 0x60A STD CAN [8] 03 22 F1 10 AA AA AA AA
+0.013791 0x68A STD CAN [8] 06 62 F1 10 01 00 00 AA
+0.015694 0x60A STD CAN [8] 03 22 F1 11 AA AA AA AA
+0.016300 0x68A STD CAN [8] 06 62 F1 11 00 00 00 AA
+0.017434 0x60A STD CAN [8] 03 22 F1 12 AA AA AA AA
+0.019886 0x68A STD CAN [8] 06 62 F1 12 00 00 00 AA
+```
+
+Requests (0x60A) and responses (0x68A) alternate, each answer 1 to 4 ms after
+its request. `67 of 67 frames shown` goes to the error stream, so it can come
+first. Without `--relative` the times are the date and time of the run.
+
+Keep logs outside the project folder: they hold whatever the board sent.
 
 ---
 
@@ -964,6 +1083,9 @@ ecu-can: profiles\test_board.dbc: 0x100 (BoardStatus) is already defined as Boar
 | `unknown key isotp.txid` (or similar) | typo in a profile | Fix the key; `profiles\example_ecu.toml` lists them all. |
 | `functional requests need --functional-id ...` | no functional ID | Add it to the profile or the command. |
 | `stopped at line N` | a script line failed | The line before it says why. |
+| `no DID named X (names: ...)` | `read-did` / `write-did` name not in the profile | Use one of the listed names, or the number. |
+| `(cannot decode: expected 6 bytes, got 2)` | the board sent another length than the `[dids]` table says | Check the table against the software on the board. |
+| `dids.0xF190: ...` | a mistake in the profile's `[dids]` table | The message names the DID and the field. |
 | `... is already defined as ... in ...` | two DBC files define the same ID | Load only one of them, or fix the files. |
 | `cannot decode: Wrong data size: 2 instead of 8 bytes` | the frame is shorter than its DBC message | Check that the DBC matches the software on the board. |
 | `no DBC files: give --dbc FILE, ...` | a DBC command without a DBC | Add `--dbc` or an `--ecu` profile with `[dbc]`. |
@@ -1002,9 +1124,11 @@ For functional requests the board stays silent instead of sending 0x11, 0x12,
 | 0x60A | physical requests (tester to board) |
 | 0x68A | responses |
 | 0x601 | functional requests |
-| 0xF186 | active session (01 default, 02 programming, 03 extended) |
-| 0xF1A0 | running image (02 application) |
-| 0xF110, 0xF111, 0xF112, 0xF189, 0xF195 | version DIDs, 3 bytes each |
-| 0xF183, 0xF184 | boot and application fingerprints |
-| 0xF18C, 0xF190 | serial number, VIN |
-| 0xFD10, 0xFD11 | phase currents, sensor addresses |
+| 0xF186 | ActiveSession (01 default, 02 programming, 03 extended) |
+| 0xF1A0 | ActiveImage (02 application) |
+| 0xF110, 0xF111, 0xF112, 0xF189, 0xF195 | CalibrationVersion, BootloaderVersion, HardwareVersion, SoftwareVersion, SupplierSoftwareVersion: 3 bytes each |
+| 0xF183, 0xF184 | BootFingerprint, AppFingerprint |
+| 0xF18C, 0xF190 | SerialNumber, VIN |
+| 0xFD10, 0xFD11 | PhaseCurrents (0.1 A), SensorAddresses |
+
+The names are the ones in `profiles\test_board.toml`.

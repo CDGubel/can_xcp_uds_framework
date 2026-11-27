@@ -5,6 +5,7 @@ import shlex
 import sys
 import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from uuid import uuid4
 
@@ -18,11 +19,12 @@ from udsoncan.exceptions import (
 
 # cli imports this module; reading attributes of the module object at call time avoids an import cycle.
 from . import cli
+from . import dids as did_table
 from .isotp_link import DEFAULT_PADDING, IsoTpConfig
 from .security import load_secret, resolve_algorithm
 from .sim_ecu import SimulatedEcu, run_simulated_ecu
 from .sim_test_board import SIM_SECRET, TEST_BOARD_FUNCTIONAL_ID, TEST_BOARD_LINK, SimulatedTestBoard
-from .transport import BusConfig, open_bus
+from .transport import BusConfig, LoggedBus, open_bus
 from .uds import (
     describe_response,
     open_uds_client,
@@ -123,10 +125,10 @@ def _add_request_commands(leaves: argparse._SubParsersAction, parents: list[argp
     leaves.add_parser("tester-present", parents=parents, help="TesterPresent (0x3E)")
 
     read = leaves.add_parser("read-did", parents=parents, help="ReadDataByIdentifier (0x22), one request per DID")
-    read.add_argument("dids", type=_word, nargs="+", metavar="DID")
+    read.add_argument("dids", nargs="+", metavar="DID", help="a number (0xF190) or a name from the profile's [dids]")
 
     write = leaves.add_parser("write-did", parents=parents, help="WriteDataByIdentifier (0x2E)")
-    write.add_argument("did", type=_word, metavar="DID")
+    write.add_argument("did", metavar="DID", help="a number (0xF184) or a name from the profile's [dids]")
     write.add_argument("data", type=cli.parse_hex_bytes, help='quoted hex value, e.g. "01 02 03"')
 
     reset = leaves.add_parser("reset", parents=parents, help="ECUReset (0x11)")
@@ -158,11 +160,24 @@ def _add_request_commands(leaves: argparse._SubParsersAction, parents: list[argp
                             help="fail unless exactly one response starts with these bytes (none: no response)")
 
 
+def _log_options() -> argparse.ArgumentParser:
+    options = argparse.ArgumentParser(add_help=False)
+    group = options.add_argument_group("recording")
+    group.add_argument("--log", metavar="FILE",
+                       help="record every frame sent and received; the extension picks the format "
+                            f"({', '.join(cli.LOG_FORMATS)})")
+    return options
+
+
 def add_commands(commands: argparse._SubParsersAction, bus_options: argparse.ArgumentParser) -> None:
     uds = commands.add_parser("uds", help="UDS diagnostics over ISO-TP")
     leaves = uds.add_subparsers(dest="uds_command", required=True)
-    parents = [bus_options, _isotp_options()]
+    parents = [bus_options, _isotp_options(), _log_options()]
     _add_request_commands(leaves, parents)
+
+    table = leaves.add_parser("dids", help="list the DIDs named in a profile's [dids] table (no bus)")
+    table.add_argument("--ecu", metavar="PROFILE.toml", required=True, help="the profile with the [dids] table")
+    table.add_argument("names", nargs="*", metavar="DID", help="DID numbers or names (default: all)")
 
     shell = leaves.add_parser("shell", parents=[*parents, _security_options()],
                               help="run requests from a script or typed lines over one connection, "
@@ -211,6 +226,7 @@ class Connection:
     functional_id: int | None
     key_algorithm: str | None = None
     key_file: str | None = None
+    dids: did_table.DidTable = field(default_factory=dict)
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -219,6 +235,11 @@ def run(args: argparse.Namespace, profile: dict[str, dict]) -> int:
         if args.uds_command == "demo":
             _demo()
             return 0
+        if args.uds_command == "dids":
+            _list_dids(profile["dids"], args.names)
+            return 0
+        if args.log:
+            cli.check_log_suffix(args.log)  # before opening the bus
         bus = cli.bus_config(args, profile)
         defaults = TEST_BOARD_LINK if getattr(args, "board", None) == "test_board" else None
         link = isotp_config(args, profile, defaults)
@@ -228,11 +249,12 @@ def run(args: argparse.Namespace, profile: dict[str, dict]) -> int:
             _simulate(bus, link, functional_id, args, profile)
             return 0
         timeout = cli.pick(args, profile["uds"], "timeout", 2.0)
-        with open_bus(bus) as can_bus, open_uds_client(can_bus, link, timeout=timeout) as client:
+        with _open_logged_bus(bus, args.log) as can_bus, open_uds_client(can_bus, link, timeout=timeout) as client:
             connection = Connection(
                 client, can_bus, link, functional_id,
                 getattr(args, "key_algorithm", None) or profile["security"].get("algorithm"),
                 getattr(args, "key_file", None) or profile["security"].get("key_file"),
+                profile["dids"],
             )
             if args.uds_command == "shell":
                 keep_alive = cli.pick(args, profile["uds"], "keep_alive", DEFAULT_KEEP_ALIVE)
@@ -272,11 +294,14 @@ def _request(connection: Connection, args: argparse.Namespace) -> int:
         client.tester_present()
         print("Tester present OK")
     elif command == "read-did":
-        for did, value in read_raw_dids(client, args.dids).items():
-            print(format_did(did, value))
+        numbers = [did_table.resolve(connection.dids, text) for text in args.dids]
+        for did in numbers:  # print each as it arrives, so a later refusal keeps the earlier values
+            value = read_raw_dids(client, [did])[did]
+            print(format_did(did, value, connection.dids))
     elif command == "write-did":
-        client.write_data_by_identifier(args.did, args.data)
-        print(f"0x{args.did:04X} written [{len(args.data)}] {_hex(args.data)}")
+        did = did_table.resolve(connection.dids, args.did)
+        client.write_data_by_identifier(did, args.data)
+        print(f"0x{did:04X} written [{len(args.data)}] {_hex(args.data)}")
     elif command == "reset":
         client.ecu_reset(args.reset_type)
         print(f"ECU reset 0x{args.reset_type:02X} accepted")
@@ -338,11 +363,43 @@ def _format_response(response: bytes) -> str:
     return f"Response [{len(response)}] {_hex(response)} ({describe_response(response)})"
 
 
-def format_did(did: int, value: bytes) -> str:
-    text = f"0x{did:04X} [{len(value)}] {_hex(value)}"
+def format_did(did: int, value: bytes, table: did_table.DidTable | None = None) -> str:
+    """``0xF190 [17] 54 45 ...``, with the DID's name and fields when the table describes it."""
+    definition = (table or {}).get(did)
+    name = f" {definition.name}" if definition else ""
+    text = f"0x{did:04X}{name} [{len(value)}] {_hex(value)}".rstrip()
+    fields = did_table.format_fields(definition, value) if definition else ""
+    if fields:
+        return f"{text}  {fields}"
     if value and all(0x20 <= byte < 0x7F for byte in value):
         text += f' "{value.decode("ascii")}"'
     return text
+
+
+def _list_dids(table: did_table.DidTable, names: list[str]) -> None:
+    if not table:
+        raise ValueError("the profile has no [dids] table")
+    numbers = [did_table.resolve(table, name) for name in names] if names else sorted(table)
+    for did in numbers:
+        if did not in table:
+            raise ValueError(f"0x{did:04X} is not in the profile's [dids] table")
+        for line in did_table.describe(table[did]):
+            print(line)
+
+
+@contextmanager
+def _open_logged_bus(config: BusConfig, log: str | None):
+    """Open the bus; with a log file, every frame sent or received on it is also recorded."""
+    with open_bus(config, receive_own_messages=bool(log)) as can_bus:
+        if not log:
+            yield can_bus
+            return
+        writer = cli.open_log_writer(log)
+        try:
+            with LoggedBus(can_bus, writer, echoes=True) as logged:
+                yield logged
+        finally:
+            writer.stop()
 
 
 # -- shell ------------------------------------------------------------------------
@@ -469,7 +526,7 @@ def _simulate(bus: BusConfig, link: IsoTpConfig, functional_id: int | None,
         ecu: SimulatedEcu = SimulatedTestBoard(secret)
     else:
         ecu = SimulatedEcu()
-    with open_bus(bus) as can_bus, run_simulated_ecu(can_bus, link, ecu, functional_id):
+    with _open_logged_bus(bus, args.log) as can_bus, run_simulated_ecu(can_bus, link, ecu, functional_id):
         functional = f", functional requests on 0x{functional_id:X}" if functional_id is not None else ""
         print(f"Simulated {args.board} ECU: requests on 0x{link.tx_id:X}, responses on 0x{link.rx_id:X}"
               f"{functional}. Press Ctrl+C to stop.", flush=True)

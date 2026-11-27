@@ -27,3 +27,66 @@ algorithm = "aes128-ecb"
 # pass --key-file, or point key_file at a file outside the repository
 # (a relative path is resolved against this profile's folder):
 # key_file = "../../keys/test_board.key"
+
+# Named DIDs: read-did and write-did take these names, and read-did shows the fields.
+# Numbers are big-endian. List them with: ecu-can uds dids --ecu profiles/test_board.toml
+[dids.0xF110]
+name = "CalibrationVersion"
+fields = [{ name = "Major", type = "uint8" }, { name = "Minor", type = "uint8" }, { name = "Patch", type = "uint8" }]
+
+[dids.0xF111]
+name = "BootloaderVersion"
+fields = [{ name = "Major", type = "uint8" }, { name = "Minor", type = "uint8" }, { name = "Patch", type = "uint8" }]
+
+[dids.0xF112]
+name = "HardwareVersion"
+fields = [{ name = "Major", type = "uint8" }, { name = "Minor", type = "uint8" }, { name = "Patch", type = "uint8" }]
+
+[dids.0xF183]
+name = "BootFingerprint"
+fields = [{ name = "Fingerprint", type = "ascii", length = 12 }]
+
+[dids.0xF184]
+name = "AppFingerprint"
+fields = [{ name = "Fingerprint", type = "ascii", length = 12 }]
+
+[dids.0xF186]
+name = "ActiveSession"
+fields = [{ name = "Session", type = "uint8", choices = { 1 = "default", 2 = "programming", 3 = "extended" } }]
+
+[dids.0xF189]
+name = "SoftwareVersion"
+fields = [{ name = "Major", type = "uint8" }, { name = "Minor", type = "uint8" }, { name = "Patch", type = "uint8" }]
+
+[dids.0xF18C]
+name = "SerialNumber"
+fields = [{ name = "Serial", type = "ascii", length = 12 }]
+
+[dids.0xF190]
+name = "VIN"
+fields = [{ name = "VIN", type = "ascii", length = 17 }]
+
+[dids.0xF195]
+name = "SupplierSoftwareVersion"
+fields = [{ name = "Major", type = "uint8" }, { name = "Minor", type = "uint8" }, { name = "Patch", type = "uint8" }]
+
+[dids.0xF1A0]
+name = "ActiveImage"
+fields = [{ name = "Image", type = "uint8", choices = { 2 = "application" } }]
+
+[dids.0xFD10]
+name = "PhaseCurrents"
+fields = [
+    { name = "U", type = "int16", scale = 0.1, unit = "A" },
+    { name = "V", type = "int16", scale = 0.1, unit = "A" },
+    { name = "W", type = "int16", scale = 0.1, unit = "A" },
+]
+
+[dids.0xFD11]
+name = "SensorAddresses"
+fields = [
+    { name = "U", type = "uint8" },
+    { name = "V", type = "uint8" },
+    { name = "W", type = "uint8" },
+    { name = "Found", type = "uint8", choices = { 0 = "no", 1 = "yes" } },
+]

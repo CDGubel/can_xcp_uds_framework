@@ -268,7 +268,7 @@ def _listen(bus: can.BusABC, duration: float, count: int, network: Network | Non
             frame_filter: FrameFilter = FrameFilter(), log: str | None = None) -> None:
     deadline = monotonic() + duration
     shown = 0
-    writer = _open_log_writer(log) if log else None
+    writer = open_log_writer(log) if log else None
     try:
         while not count or shown < count:
             remaining = deadline - monotonic()
@@ -289,13 +289,13 @@ def _listen(bus: can.BusABC, duration: float, count: int, network: Network | Non
             writer.stop()
 
 
-def _check_log_suffix(path: str) -> None:
+def check_log_suffix(path: str) -> None:
     if Path(path).suffix.lower() not in LOG_FORMATS:
         raise ValueError(f"--log needs a file ending in {', '.join(LOG_FORMATS)}")
 
 
-def _open_log_writer(path: str) -> can.Listener:
-    _check_log_suffix(path)
+def open_log_writer(path: str) -> can.Listener:
+    check_log_suffix(path)
     return can.Logger(path)
 
 
@@ -456,7 +456,7 @@ def main(argv: list[str] | None = None) -> int:
             network = load_network(args, profile)
             frame_filter = FrameFilter.from_args(args, network)
             if args.log:
-                _check_log_suffix(args.log)  # before opening the bus
+                check_log_suffix(args.log)  # before opening the bus
             with open_bus(config) as bus:
                 _listen(bus, args.duration, args.count, network, frame_filter, args.log)
     except KeyboardInterrupt:
