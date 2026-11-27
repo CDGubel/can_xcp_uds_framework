@@ -1,6 +1,7 @@
-"""Command-line entry points for raw CAN communication."""
+"""Command-line entry points for raw CAN and UDS communication."""
 
 import argparse
+import logging
 import math
 import sys
 from time import monotonic
@@ -8,24 +9,38 @@ from uuid import uuid4
 
 import can
 
+from . import uds_cli
+from .ecu_profile import load_profile
 from .transport import BusConfig, make_frame, open_bus, send_frame
 
+LIBRARY_LOGGERS = ("UdsClient", "Connection", "isotp")
 
-def _can_id(value: str) -> int:
+BUS_DEFAULTS = {
+    "interface": "virtual",
+    "channel": None,
+    "bitrate": 500_000,
+    "fd": False,
+    "data_bitrate": None,
+    "nominal_sample_point": 80.0,
+    "data_sample_point": 75.0,
+}
+
+
+def parse_int(value: str) -> int:
     try:
         return int(value, 16 if value.lower().startswith("0x") else 10)
     except ValueError as exc:
-        raise argparse.ArgumentTypeError("expected a decimal or 0x-prefixed CAN ID") from exc
+        raise argparse.ArgumentTypeError("expected a decimal or 0x-prefixed integer") from exc
 
 
-def _payload(value: str) -> bytes:
+def parse_hex_bytes(value: str) -> bytes:
     try:
         return bytes.fromhex(value)
     except ValueError as exc:
         raise argparse.ArgumentTypeError('expected hex bytes, for example "01 02 AB"') from exc
 
 
-def _positive_seconds(value: str) -> float:
+def positive_seconds(value: str) -> float:
     seconds = float(value)
     if not math.isfinite(seconds) or seconds <= 0:
         raise argparse.ArgumentTypeError("expected a finite positive number of seconds")
@@ -46,37 +61,64 @@ def _nonnegative_int(value: str) -> int:
     return count
 
 
+def _bus_options() -> argparse.ArgumentParser:
+    """Bus options default to None so an --ecu profile can fill them in."""
+    options = argparse.ArgumentParser(add_help=False)
+    group = options.add_argument_group("bus options")
+    group.add_argument("--ecu", metavar="PROFILE.toml", help="load bus, ISO-TP and UDS settings from a profile")
+    group.add_argument("--interface", choices=("virtual", "pcan"), help="default: virtual")
+    group.add_argument("--channel", help="default: ecu-can (virtual) or PCAN_USBBUS1 (PCAN)")
+    group.add_argument("--bitrate", type=int, help="nominal bit/s (default: 500000)")
+    group.add_argument("--fd", action=argparse.BooleanOptionalAction, help="open the bus in CAN-FD mode")
+    group.add_argument("--data-bitrate", type=int, help="FD data bit/s (default: 2000000)")
+    group.add_argument("--nominal-sample-point", type=_sample_point,
+                       help="PCAN FD nominal sample point in percent (default: 80)")
+    group.add_argument("--data-sample-point", type=_sample_point,
+                       help="PCAN FD data sample point in percent (default: 75)")
+    return options
+
+
 def _parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Raw CAN and CAN-FD bench tools")
-    bus_options = argparse.ArgumentParser(add_help=False)
-    bus_options.add_argument("--interface", choices=("virtual", "pcan"), default="virtual")
-    bus_options.add_argument("--channel", help="default: ecu-can (virtual) or PCAN_USBBUS1 (PCAN)")
-    bus_options.add_argument("--bitrate", type=int, default=500_000, help="nominal bit/s (default: 500000)")
-    bus_options.add_argument("--fd", action="store_true", help="open the bus in CAN-FD mode")
-    bus_options.add_argument("--data-bitrate", type=int, help="FD data bit/s (default: 2000000)")
-    bus_options.add_argument("--nominal-sample-point", type=_sample_point, default=80.0,
-                             help="PCAN FD nominal sample point in percent (default: 80)")
-    bus_options.add_argument("--data-sample-point", type=_sample_point, default=75.0,
-                             help="PCAN FD data sample point in percent (default: 75)")
+    parser = argparse.ArgumentParser(description="CAN, CAN-FD and UDS bench tools")
+    parser.add_argument("-v", "--verbose", action="store_true", help="show ISO-TP and UDS library logs")
+    bus_options = _bus_options()
 
     commands = parser.add_subparsers(dest="command", required=True)
     tx = commands.add_parser("send", parents=[bus_options], help="send one raw data frame")
-    tx.add_argument("can_id", type=_can_id, metavar="ID")
-    tx.add_argument("data", nargs="?", type=_payload, default=b"", help="quoted hex payload")
+    tx.add_argument("can_id", type=parse_int, metavar="ID")
+    tx.add_argument("data", nargs="?", type=parse_hex_bytes, default=b"", help="quoted hex payload")
     tx.add_argument("--extended", action="store_true", help="use a 29-bit ID")
     tx.add_argument("--frame-fd", action="store_true", help="send an FD frame (requires --fd)")
     tx.add_argument("--brs", action="store_true", help="switch data bitrate (requires --frame-fd)")
 
     rx = commands.add_parser("listen", parents=[bus_options], help="display received frames")
-    rx.add_argument("--duration", type=_positive_seconds, default=5.0, help="total seconds (default: 5)")
+    rx.add_argument("--duration", type=positive_seconds, default=5.0, help="total seconds (default: 5)")
     rx.add_argument("--count", type=_nonnegative_int, default=0, help="stop after this many frames (0: no limit)")
 
     demo = commands.add_parser("demo", help="send and receive a frame on two in-process virtual buses")
     demo.add_argument("--fd", action="store_true", help="exercise an FD frame with bitrate switching")
+
+    uds_cli.add_commands(commands, bus_options)
     return parser
 
 
-def _format_frame(frame: can.Message) -> str:
+def load_args_profile(args: argparse.Namespace) -> dict[str, dict]:
+    return load_profile(args.ecu) if getattr(args, "ecu", None) else {"bus": {}, "isotp": {}, "uds": {}}
+
+
+def pick(args: argparse.Namespace, section: dict, name: str, default):
+    """Command line first, then the profile, then the built-in default."""
+    value = getattr(args, name, None)
+    if value is not None:
+        return value
+    return section.get(name, default)
+
+
+def bus_config(args: argparse.Namespace, profile: dict[str, dict]) -> BusConfig:
+    return BusConfig(**{name: pick(args, profile["bus"], name, default) for name, default in BUS_DEFAULTS.items()})
+
+
+def format_frame(frame: can.Message) -> str:
     width = 8 if frame.is_extended_id else 3
     flags = ["EXT" if frame.is_extended_id else "STD", "FD" if frame.is_fd else "CAN"]
     if frame.bitrate_switch:
@@ -103,7 +145,7 @@ def _listen(bus: can.BusABC, duration: float, count: int) -> None:
         frame = bus.recv(timeout=remaining)
         if frame is None:
             break
-        print(f"{frame.timestamp:.6f} {_format_frame(frame)}", flush=True)
+        print(f"{frame.timestamp:.6f} {format_frame(frame)}", flush=True)
         received += 1
 
 
@@ -116,33 +158,35 @@ def _demo(fd: bool) -> None:
         if received is None or not received.equals(frame, check_direction=False, timestamp_delta=None,
                                                    check_channel=False):
             raise RuntimeError("virtual demo did not receive the expected frame")
-    print(f"Virtual round trip OK. {_format_frame(received)}")
+    print(f"Virtual round trip OK. {format_frame(received)}")
 
 
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
+    if args.verbose:
+        logging.basicConfig(level=logging.DEBUG, format="%(relativeCreated)8.1f %(name)s %(message)s")
+    else:
+        # The CLI reports errors itself, so keep the libraries' own error logs quiet.
+        for name in LIBRARY_LOGGERS:
+            logging.getLogger(name).setLevel(logging.CRITICAL)
     try:
         if args.command == "demo":
             _demo(args.fd)
             return 0
 
-        config = BusConfig(
-            interface=args.interface,
-            channel=args.channel,
-            bitrate=args.bitrate,
-            fd=args.fd,
-            data_bitrate=args.data_bitrate,
-            nominal_sample_point=args.nominal_sample_point,
-            data_sample_point=args.data_sample_point,
-        )
+        profile = load_args_profile(args)
+        if args.command == "uds":
+            return uds_cli.run(args, profile)
+
+        config = bus_config(args, profile)
         if args.command == "send":
-            if args.frame_fd and not args.fd:
+            if args.frame_fd and not config.fd:
                 raise ValueError("--frame-fd requires --fd")
             frame = make_frame(args.can_id, args.data, extended=args.extended, fd=args.frame_fd, brs=args.brs)
             with open_bus(config) as bus:
                 send_frame(bus, frame)
-            print(f"Sent {_format_frame(frame)}")
+            print(f"Sent {format_frame(frame)}")
         else:
             with open_bus(config) as bus:
                 _listen(bus, args.duration, args.count)
