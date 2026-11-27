@@ -15,6 +15,8 @@ the last field may leave out to take the rest of the payload::
     [dids.0xF186]
     name = "ActiveSession"
     fields = [{ name = "Session", type = "uint8", choices = { 1 = "default", 3 = "extended" } }]
+
+``display = "hex"`` prints an unscaled integer field as ``0x...`` at its full width.
 """
 
 from dataclasses import dataclass, field
@@ -25,7 +27,7 @@ INTEGER_TYPES = {
     "int8": (1, True), "int16": (2, True), "int24": (3, True), "int32": (4, True),
 }
 BYTE_TYPES = ("ascii", "bytes")
-FIELD_KEYS = {"name", "type", "length", "scale", "offset", "unit", "choices"}
+FIELD_KEYS = {"name", "type", "length", "scale", "offset", "unit", "choices", "display"}
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,7 @@ class DidField:
     offset: float = 0
     unit: str = ""
     choices: dict[int, str] = field(default_factory=dict)
+    hex: bool = False  # display = "hex": the raw value as 0x..., full width
 
     @property
     def signed(self) -> bool:
@@ -53,6 +56,8 @@ class DidField:
             text += f", {'+' if self.offset > 0 else '-'}{_number(abs(self.offset))}"
         if self.unit:
             text += f" {self.unit}"
+        if self.hex:
+            text += ", hex"
         if self.choices:
             text += ", " + " ".join(f"{key}={value}" for key, value in self.choices.items())
         return text
@@ -151,6 +156,11 @@ def _parse_field(where: str, item: object, last: bool) -> DidField:
     unit = item.get("unit", "")
     if not isinstance(unit, str):
         raise ValueError(f"{where}: unit must be text")
+    display = item.get("display", "decimal")
+    if display not in ("decimal", "hex"):
+        raise ValueError(f"{where}: display must be \"decimal\" or \"hex\"")
+    if display == "hex" and (kind not in INTEGER_TYPES or scale != 1 or offset):
+        raise ValueError(f"{where}: display = \"hex\" is for unscaled integer fields")
     choices_in = item.get("choices", {})
     if not isinstance(choices_in, dict):
         raise ValueError(f"{where}: choices must be a table such as {{ 1 = \"default\" }}")
@@ -165,7 +175,7 @@ def _parse_field(where: str, item: object, last: bool) -> DidField:
         if not isinstance(value, str):
             raise ValueError(f"{where}: choice {key} must be text")
         choices[raw] = value
-    return DidField(name, kind, length, scale, offset, unit, choices)
+    return DidField(name, kind, length, scale, offset, unit, choices, display == "hex")
 
 
 def decode(definition: DidDefinition, payload: bytes) -> tuple[list[tuple[DidField, object]], str | None]:
@@ -187,6 +197,9 @@ def decode(definition: DidDefinition, payload: bytes) -> tuple[list[tuple[DidFie
             values.append((item, chunk.rstrip(b"\x00").decode("latin-1")))
         else:
             raw = int.from_bytes(chunk, "big", signed=item.signed)
+            if item.hex and raw not in item.choices:
+                values.append((item, f"0x{int.from_bytes(chunk, 'big'):0{2 * len(chunk)}X}"))
+                continue
             values.append((item, item.choices[raw] if raw in item.choices else raw * item.scale + item.offset))
     return values, None
 
@@ -197,8 +210,8 @@ def format_value(item: DidField, value: object) -> str:
     if item.type == "ascii":
         printable = "".join(c if 0x20 <= ord(c) < 0x7F else "." for c in value)
         return f'"{printable}"'
-    if isinstance(value, str):  # a choice name
-        return value
+    if isinstance(value, str):  # a choice name, or a hex text
+        return f"{value} {item.unit}" if item.unit and value.startswith("0x") else value
     decimals = max(_decimals(item.scale), _decimals(item.offset))
     text = f"{value:.{decimals}f}" if decimals else str(int(round(value)))
     return f"{text} {item.unit}" if item.unit else text
