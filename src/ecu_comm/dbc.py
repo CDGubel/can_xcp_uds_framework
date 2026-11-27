@@ -174,18 +174,22 @@ def _raw_choice(message: "Message", name: str, values: dict[str, object]) -> obj
     return value
 
 
-def format_value(signal: "Signal", value: object) -> str:
-    """A value with as many decimals as the signal's scale and offset need, and its unit."""
+def value_text(signal: "Signal", value: object) -> str:
+    """A value with as many decimals as the signal's scale and offset need, without its unit."""
     if isinstance(value, (int, float)) and not isinstance(value, bool):
         decimals = max(_decimals(signal.scale), _decimals(signal.offset))
         if decimals:
-            text = f"{value:.{decimals}f}"
-        elif float(value).is_integer():
-            text = str(int(value))
-        else:
-            text = f"{value:g}"
-        return f"{text} {signal.unit}" if signal.unit else text
+            return f"{value:.{decimals}f}"
+        return str(int(value)) if float(value).is_integer() else f"{value:g}"
     return str(value)  # a choice name (NamedSignalValue) or raw bytes
+
+
+def format_value(signal: "Signal", value: object) -> str:
+    """``value_text`` followed by the unit, for numbers that have one."""
+    text = value_text(signal, value)
+    if signal.unit and isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{text} {signal.unit}"
+    return text
 
 
 def format_decoded(decoded: Decoded, signals: set[str] | None = None) -> str:

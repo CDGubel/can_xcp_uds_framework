@@ -1,10 +1,13 @@
 """Command-line entry points for raw CAN and UDS communication."""
 
 import argparse
+import contextlib
+import csv
 import logging
 import math
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 from time import monotonic, sleep
 from uuid import uuid4
 
@@ -12,6 +15,7 @@ import can
 
 from . import uds_cli
 from .dbc import (
+    Decoded,
     Network,
     complete_values,
     decode,
@@ -20,11 +24,17 @@ from .dbc import (
     format_decoded,
     load_dbc,
     parse_assignments,
+    value_text,
 )
 from .ecu_profile import empty_profile, load_profile
 from .transport import BusConfig, make_frame, open_bus, send_frame
 
 LIBRARY_LOGGERS = ("UdsClient", "Connection", "isotp")
+
+# Log formats python-can writes (all with CAN-FD) and reads; .trc is read only (its writer has no CAN-FD),
+# .mf4 needs the asammdf package.
+LOG_FORMATS = (".asc", ".blf", ".csv", ".log")
+READ_FORMATS = (*LOG_FORMATS, ".trc", ".db", ".mf4")
 
 BUS_DEFAULTS = {
     "interface": "virtual",
@@ -106,6 +116,16 @@ def _dbc_options(with_profile: bool = False) -> argparse.ArgumentParser:
     return options
 
 
+def _filter_options() -> argparse.ArgumentParser:
+    options = argparse.ArgumentParser(add_help=False)
+    group = options.add_argument_group("DBC filters")
+    group.add_argument("--message", action="append", metavar="NAME",
+                       help="show only this DBC message (repeat for more)")
+    group.add_argument("--signal", action="append", metavar="NAME",
+                       help="show only this DBC signal, and only frames that carry it (repeat for more)")
+    return options
+
+
 def _parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="CAN, CAN-FD and UDS bench tools")
     parser.add_argument("-v", "--verbose", action="store_true", help="show ISO-TP and UDS library logs")
@@ -119,14 +139,21 @@ def _parser() -> argparse.ArgumentParser:
     tx.add_argument("--frame-fd", action="store_true", help="send an FD frame (requires --fd)")
     tx.add_argument("--brs", action="store_true", help="switch data bitrate (requires --frame-fd)")
 
-    rx = commands.add_parser("listen", parents=[bus_options, _dbc_options()], help="display received frames")
+    rx = commands.add_parser("listen", parents=[bus_options, _dbc_options(), _filter_options()],
+                             help="display received frames")
     rx.add_argument("--duration", type=positive_seconds, default=5.0, help="total seconds (default: 5)")
     rx.add_argument("--count", type=_nonnegative_int, default=0,
                     help="stop after this many displayed frames (0: no limit)")
-    rx.add_argument("--message", action="append", metavar="NAME",
-                    help="show only this DBC message (repeat for more)")
-    rx.add_argument("--signal", action="append", metavar="NAME",
-                    help="show only this DBC signal, and only frames that carry it (repeat for more)")
+    rx.add_argument("--log", metavar="FILE",
+                    help="also record every received frame; the extension picks the format "
+                         f"({', '.join(LOG_FORMATS)})")
+
+    log = commands.add_parser("decode", parents=[_dbc_options(with_profile=True), _filter_options()],
+                              help="decode a recorded log file with DBC files")
+    log.add_argument("logfile", metavar="LOGFILE", help=f"a log file ({', '.join(READ_FORMATS)})")
+    log.add_argument("--relative", action="store_true", help="show times from the first frame instead of as logged")
+    log.add_argument("--csv", metavar="FILE",
+                     help="write one row per decoded signal value (time, ID, message, signal, value, unit) instead")
 
     dbc = commands.add_parser("dbc", help="inspect DBC files")
     dbc_commands = dbc.add_subparsers(dest="dbc_command", required=True)
@@ -216,35 +243,105 @@ class FrameFilter:
                 raise ValueError(f"no signal named {', '.join(unknown)} in the DBC files")
         return cls(messages, signals)
 
+    def select(self, frame: can.Message, network: Network | None) -> tuple[bool, Decoded | None]:
+        """Whether to show a frame, and its decoding (None for an unknown ID or without DBC files)."""
+        decoded = decode(network, frame) if network is not None else None
+        if decoded is None:
+            return self.messages is None and self.signals is None, None
+        if self.messages is not None and decoded.message.name not in self.messages:
+            return False, decoded
+        if self.signals is not None and decoded.error is None and not self.signals & decoded.values.keys():
+            return False, decoded
+        return True, decoded
+
     def line(self, frame: can.Message, network: Network | None) -> str | None:
         """The text to print for a frame, or None to skip it."""
-        decoded = decode(network, frame) if network is not None else None
-        restricted = self.messages is not None or self.signals is not None
+        show, decoded = self.select(frame, network)
+        if not show:
+            return None
         if decoded is None:
-            return None if restricted else format_frame(frame)
-        if self.messages is not None and decoded.message.name not in self.messages:
-            return None
-        if self.signals is not None and decoded.error is None and not self.signals & decoded.values.keys():
-            return None
+            return format_frame(frame)
         return f"{format_frame(frame)}  {format_decoded(decoded, self.signals)}"
 
 
 def _listen(bus: can.BusABC, duration: float, count: int, network: Network | None = None,
-            frame_filter: FrameFilter = FrameFilter()) -> None:
+            frame_filter: FrameFilter = FrameFilter(), log: str | None = None) -> None:
     deadline = monotonic() + duration
     shown = 0
-    while not count or shown < count:
-        remaining = deadline - monotonic()
-        if remaining <= 0:
-            break
-        frame = bus.recv(timeout=remaining)
-        if frame is None:
-            break
-        line = frame_filter.line(frame, network)
-        if line is None:
-            continue
-        print(f"{frame.timestamp:.6f} {line}", flush=True)
-        shown += 1
+    writer = _open_log_writer(log) if log else None
+    try:
+        while not count or shown < count:
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                break
+            frame = bus.recv(timeout=remaining)
+            if frame is None:
+                break
+            if writer is not None:
+                writer.on_message_received(frame)
+            line = frame_filter.line(frame, network)
+            if line is None:
+                continue
+            print(f"{frame.timestamp:.6f} {line}", flush=True)
+            shown += 1
+    finally:
+        if writer is not None:
+            writer.stop()
+
+
+def _check_log_suffix(path: str) -> None:
+    if Path(path).suffix.lower() not in LOG_FORMATS:
+        raise ValueError(f"--log needs a file ending in {', '.join(LOG_FORMATS)}")
+
+
+def _open_log_writer(path: str) -> can.Listener:
+    _check_log_suffix(path)
+    return can.Logger(path)
+
+
+def _decode_log(args: argparse.Namespace, profile: dict[str, dict]) -> None:
+    suffix = Path(args.logfile).suffix.lower()
+    if suffix not in READ_FORMATS:
+        raise ValueError(f"cannot read {suffix or 'a file without extension'}: use {', '.join(READ_FORMATS)}")
+    if not Path(args.logfile).is_file():
+        raise ValueError(f"log file not found: {args.logfile}")
+    network = load_network(args, profile)
+    frame_filter = FrameFilter.from_args(args, network)
+    if args.csv and network is None:
+        raise ValueError("--csv needs DBC files (--dbc, or dbc.files in the --ecu profile)")
+    start = None
+    read = shown = 0
+    with contextlib.ExitStack() as stack:
+        reader = stack.enter_context(can.LogReader(args.logfile))
+        rows = None
+        if args.csv:
+            rows = csv.writer(stack.enter_context(open(args.csv, "w", newline="", encoding="utf-8")))
+            rows.writerow(["time", "id", "message", "signal", "value", "unit"])
+        for frame in reader:
+            read += 1
+            if start is None:
+                start = frame.timestamp
+            time = frame.timestamp - start if args.relative else frame.timestamp
+            show, decoded = frame_filter.select(frame, network)
+            if not show:
+                continue
+            shown += 1
+            if rows is None:
+                text = format_frame(frame) if decoded is None else (
+                    f"{format_frame(frame)}  {format_decoded(decoded, frame_filter.signals)}")
+                print(f"{time:.6f} {text}")
+            elif decoded is not None and decoded.error is None:
+                for name, value in decoded.values.items():
+                    if frame_filter.signals is None or name in frame_filter.signals:
+                        signal = decoded.message.get_signal_by_name(name)
+                        rows.writerow([f"{time:.6f}", _frame_id(frame), decoded.message.name, name,
+                                       value_text(signal, value), signal.unit or ""])
+    target = f", written to {args.csv}" if args.csv else ""
+    print(f"{shown} of {read} frames shown{target}", file=sys.stderr)
+
+
+def _frame_id(frame: can.Message) -> str:
+    return f"0x{frame.arbitration_id:08X}" if frame.is_extended_id else f"0x{frame.arbitration_id:03X}"
 
 
 def _dbc_show(args: argparse.Namespace, profile: dict[str, dict]) -> None:
@@ -334,6 +431,9 @@ def main(argv: list[str] | None = None) -> int:
         profile = load_args_profile(args)
         if args.command == "uds":
             return uds_cli.run(args, profile)
+        if args.command == "decode":
+            _decode_log(args, profile)
+            return 0
         if args.command == "dbc":
             if args.dbc_command == "show":
                 _dbc_show(args, profile)
@@ -355,8 +455,10 @@ def main(argv: list[str] | None = None) -> int:
         else:
             network = load_network(args, profile)
             frame_filter = FrameFilter.from_args(args, network)
+            if args.log:
+                _check_log_suffix(args.log)  # before opening the bus
             with open_bus(config) as bus:
-                _listen(bus, args.duration, args.count, network, frame_filter)
+                _listen(bus, args.duration, args.count, network, frame_filter, args.log)
     except KeyboardInterrupt:
         return 130
     except (can.CanError, OSError, ValueError, RuntimeError) as exc:

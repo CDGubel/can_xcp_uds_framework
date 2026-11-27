@@ -323,3 +323,101 @@ def test_send_fd_message(monkeypatch, capsys):
     assert status == 1 and frames == [] and "an FD frame requires a bus opened in CAN-FD mode" in err
     status, frames, _, err = send_cli(monkeypatch, capsys, False, "BoardStatus", "--brs")
     assert status == 1 and frames == [] and "--brs needs a CAN-FD message" in err
+
+
+# -- listen --log and ecu-can decode ---------------------------------------------------
+
+
+def record(monkeypatch, capsys, path):
+    """Record TRAFFIC plus an FD frame into a log file with listen --log."""
+    import ecu_comm.cli as cli
+
+    # Log writers turn a channel name's trailing digits into a channel number (PCAN_USBBUS2 -> 2), and BLF
+    # stores it in 16 bits: a random hex name ending in many digits would overflow, so end it with a letter.
+    config = BusConfig(channel=f"{uuid4().hex}-log", fd=True)
+    fd_frame = make_frame(0x300, bytes.fromhex("01 37 FF 00 00 00 00 00 7B 00 00 00"), fd=True, brs=True)
+    with open_bus(config) as sender, open_bus(config) as receiver:
+        for frame in [*TRAFFIC, fd_frame]:
+            send_frame(sender, frame)
+        monkeypatch.setattr(cli, "open_bus", lambda config: receiver)
+        assert main(["listen", "--channel", config.channel, "--fd", "--duration", "0.3", "--log", str(path)]) == 0
+    capsys.readouterr()
+
+
+DECODED_LINES = [
+    "0x100 STD CAN [8] 52 6C 09 FB 00 00 00 00  BoardStatus State=Running, Counter=5, SupplyVoltage=24.12 V, "
+    "BoardTemperature=-5 degC, FaultActive=0",
+    "0x7FF STD CAN [2] 01 02",
+    "0x200 STD CAN [6] 00 0D 00 24 FF C1  PhaseCurrents CurrentU=1.3 A, CurrentV=3.6 A, CurrentW=-6.3 A",
+    "0x18FF0010 EXT CAN [8] 01 02 07 00 00 00 00 00  BoardInfo Page=1, SwMajor=2, SwMinor=7",
+]
+FD_LINE = ("0x300 STD FD BRS [12] 01 37 FF 00 00 00 00 00 7B 00 00 00  "
+           "TesterCommand Mode=Speed, SpeedRequest=-100.5 rpm, TorqueLimit=12.3 Nm")
+
+
+@pytest.mark.parametrize("suffix", [".asc", ".blf", ".log", ".csv"])
+def test_record_and_decode_each_format(monkeypatch, capsys, tmp_path, suffix):
+    log = tmp_path / f"bench{suffix}"
+    record(monkeypatch, capsys, log)
+    assert main(["decode", "--dbc", str(SAMPLE_DBC), "--relative", str(log)]) == 0
+    captured = capsys.readouterr()
+    times = [float(line.split(" ", 1)[0]) for line in captured.out.splitlines()]
+    lines = [line.split(" ", 1)[1] for line in captured.out.splitlines()]
+    # The CSV format keeps no FD flags; the frame still decodes.
+    fd_line = FD_LINE.replace("STD FD BRS", "STD CAN") if suffix == ".csv" else FD_LINE
+    assert lines == [*DECODED_LINES, fd_line]
+    assert times[0] == 0 and times == sorted(times) and times[-1] < 1
+    assert captured.err == "5 of 5 frames shown\n"
+
+
+def test_decode_filters_and_csv(monkeypatch, capsys, tmp_path):
+    log = tmp_path / "bench.blf"
+    record(monkeypatch, capsys, log)
+    assert main(["decode", "--dbc", str(SAMPLE_DBC), "--signal", "CurrentW", "--signal", "SwMajor", str(log)]) == 0
+    captured = capsys.readouterr()
+    assert [line.split("  ", 1)[1] for line in captured.out.splitlines()] == [
+        "PhaseCurrents CurrentW=-6.3 A", "BoardInfo SwMajor=2"]
+    assert captured.err == "2 of 5 frames shown\n"
+
+    table = tmp_path / "signals.csv"
+    assert main(["decode", "--dbc", str(SAMPLE_DBC), "--message", "PhaseCurrents", "--message", "BoardStatus",
+                 "--relative", "--csv", str(table), str(log)]) == 0
+    assert capsys.readouterr() == ("", f"2 of 5 frames shown, written to {table}\n")
+    rows = [row.split(",", 1)[1] for row in table.read_text(encoding="utf-8").splitlines()]
+    assert rows == [
+        "id,message,signal,value,unit",
+        "0x100,BoardStatus,State,Running,",
+        "0x100,BoardStatus,Counter,5,",
+        "0x100,BoardStatus,SupplyVoltage,24.12,V",
+        "0x100,BoardStatus,BoardTemperature,-5,degC",
+        "0x100,BoardStatus,FaultActive,0,",
+        "0x200,PhaseCurrents,CurrentU,1.3,A",
+        "0x200,PhaseCurrents,CurrentV,3.6,A",
+        "0x200,PhaseCurrents,CurrentW,-6.3,A",
+    ]
+
+
+def test_decode_without_dbc_lists_raw_frames(monkeypatch, capsys, tmp_path):
+    log = tmp_path / "bench.asc"
+    record(monkeypatch, capsys, log)
+    assert main(["decode", str(log)]) == 0
+    assert len(capsys.readouterr().out.splitlines()) == 5
+
+
+@pytest.mark.parametrize("args,message", [
+    (["decode", "bench.txt"], "cannot read .txt: use .asc, .blf, .csv, .log, .trc, .db, .mf4"),
+    (["decode", "missing.asc"], "log file not found: missing.asc"),
+    (["listen", "--duration", "0.1", "--log", "bench.trc"], "--log needs a file ending in .asc, .blf, .csv, .log"),
+])
+def test_log_errors(capsys, tmp_path, monkeypatch, args, message):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "bench.txt").write_text("")
+    assert main(args) == 1
+    assert message in capsys.readouterr().err
+
+
+def test_csv_needs_dbc(monkeypatch, capsys, tmp_path):
+    log = tmp_path / "bench.log"
+    record(monkeypatch, capsys, log)
+    assert main(["decode", "--csv", str(tmp_path / "out.csv"), str(log)]) == 1
+    assert "--csv needs DBC files" in capsys.readouterr().err
